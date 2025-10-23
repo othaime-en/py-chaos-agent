@@ -1,0 +1,16 @@
+# Python
+*.pyc
+__pycache__/
+*.pyo
+*.pyd
+.Python
+venv/
+*.egg-info/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Misc
+internal/
+.DS_Store
+Thumbs.db
+*.log
