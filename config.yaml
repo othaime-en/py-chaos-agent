@@ -1,0 +1,28 @@
+agent:
+  interval_seconds: 10
+  dry_run: false
+
+failures:
+  cpu:
+    enabled: true
+    duration_seconds: 5
+    probability: 0.3
+    cores: 1
+
+  memory:
+    enabled: true
+    duration_seconds: 8
+    probability: 0.2
+    mb: 200
+
+  process:
+    enabled: true
+    target_name: "python" # or "nginx", "node", etc.
+    probability: 0.4
+
+  network:
+    enabled: true
+    interface: "eth0"
+    delay_ms: 300
+    duration_seconds: 10
+    probability: 0.25
