@@ -17,12 +17,13 @@ def inject_memory(config: dict, dry_run: bool = False):
     INJECTIONS_TOTAL.labels(failure_type='memory', status='success').inc()
 
     start = time.time()
-    try:
-        for _ in range(mb):
-            data.append(chunk)
-            if time.time() - start > duration:
-                break
-        time.sleep(duration)
+    allocated = 0
+    while allocated < mb and time.time() - start < duration:
+        data.append(chunk)
+        allocated += 1
+    remaining = duration - (time.time() - start)
+    if remaining > 0:
+        time.sleep(remaining)
     except Exception as e:
         INJECTIONS_TOTAL.labels(failure_type='memory', status='failed').inc()
         print(f"[MEMORY] Failed: {e}")
