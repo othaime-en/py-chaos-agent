@@ -1,4 +1,3 @@
-# src/failures/process.py
 import psutil
 import signal
 from ..metrics import INJECTIONS_TOTAL
