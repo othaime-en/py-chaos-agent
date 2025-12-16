@@ -16,14 +16,15 @@ def inject_memory(config: dict, dry_run: bool = False):
     INJECTION_ACTIVE.labels(failure_type='memory').set(1)
     INJECTIONS_TOTAL.labels(failure_type='memory', status='success').inc()
 
-    start = time.time()
-    allocated = 0
-    while allocated < mb and time.time() - start < duration:
-        data.append(chunk)
-        allocated += 1
-    remaining = duration - (time.time() - start)
-    if remaining > 0:
-        time.sleep(remaining)
+    try:
+        start = time.time()
+        allocated = 0
+        while allocated < mb and time.time() - start < duration:
+            data.append(chunk)
+            allocated += 1
+        remaining = duration - (time.time() - start)
+        if remaining > 0:
+            time.sleep(remaining)
     except Exception as e:
         INJECTIONS_TOTAL.labels(failure_type='memory', status='failed').inc()
         print(f"[MEMORY] Failed: {e}")
