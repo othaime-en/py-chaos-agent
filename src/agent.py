@@ -1,8 +1,8 @@
 import time
 import random
 import importlib
-from config import load_config
-from metrics import start_metrics_server
+from .config import load_config
+from .metrics import start_metrics_server
 
 FAILURE_MODULES = {
     'cpu': 'failures.cpu',
