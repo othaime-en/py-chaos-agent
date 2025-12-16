@@ -1,5 +1,4 @@
 import psutil
-import signal
 from ..metrics import INJECTIONS_TOTAL
 
 def inject_process(config: dict, dry_run: bool = False):
@@ -7,7 +6,7 @@ def inject_process(config: dict, dry_run: bool = False):
     if not target_name:
         return
 
-    procs = [p for p in psutil.process_iter(['name']) if p.info['name'] == target_name]
+    procs = [p for p in psutil.process_iter(['name']) if target_name.lower() in p.info['name'].lower()]
     if not procs:
         print(f"[PROCESS] No process named '{target_name}' found")
         return
@@ -22,7 +21,7 @@ def inject_process(config: dict, dry_run: bool = False):
 
     print(f"[PROCESS] Killing {target_name} (PID: {pid})...")
     try:
-        target.send_signal(signal.SIGKILL)
+        target.terminate()
         INJECTIONS_TOTAL.labels(failure_type='process', status='success').inc()
     except Exception as e:
         INJECTIONS_TOTAL.labels(failure_type='process', status='failed').inc()
