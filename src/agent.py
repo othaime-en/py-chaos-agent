@@ -5,10 +5,10 @@ from .config import load_config
 from .metrics import start_metrics_server
 
 FAILURE_MODULES = {
-    'cpu': 'failures.cpu',
-    'memory': 'failures.memory',
-    'process': 'failures.process',
-    'network': 'failures.network'
+    'cpu': '.failures.cpu',
+    'memory': '.failures.memory',
+    'process': '.failures.process',
+    'network': '.failures.network'
 }
 
 def main():
@@ -25,7 +25,7 @@ def main():
             if random.random() > cfg['probability']:
                 continue
 
-            module = importlib.import_module(FAILURE_MODULES[name])
+            module = importlib.import_module(FAILURE_MODULES[name], package=__package__)
             inject_func = getattr(module, f"inject_{name}")
             inject_func(cfg, dry_run=config.agent.dry_run)
 
