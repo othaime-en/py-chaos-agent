@@ -3,14 +3,18 @@ import time
 import psutil
 from ..metrics import INJECTIONS_TOTAL, INJECTION_ACTIVE
 
+def _worker(duration: int):
+    end = time.time() + duration
+    while time.time() < end:
+        pass  # spin
+
+
 def _cpu_hog(cores: int, duration: int):
-    def _worker():
-        end = time.time() + duration
-        while time.time() < end:
-            pass  # spin
-    procs = [multiprocessing.Process(target=_worker) for _ in range(cores)]
-    for p in procs: p.start()
-    for p in procs: p.join()
+    procs = [multiprocessing.Process(target=_worker, args=(duration,)) for _ in range(cores)]
+    for p in procs:
+        p.start()
+    for p in procs:
+        p.join()
 
 def inject_cpu(config: dict, dry_run: bool = False):
     cores = config.get('cores', 1)
