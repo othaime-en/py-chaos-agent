@@ -21,4 +21,4 @@ RUN useradd -m appuser
 USER appuser
 
 # Entry point
-CMD ["python", "-u", "src/agent.py"]
+CMD ["python", "-u", "-m", "src.agent"]
