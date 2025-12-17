@@ -59,3 +59,17 @@ spec:
           image: target-app:latest
           ports:
             - containerPort: 8080
+
+        - name: chaos-agent
+          image: py-chaos-agent:latest
+          volumeMounts:
+            - name: config
+              mountPath: /app/config.yaml
+              subPath: config.yaml
+          ports:
+            - containerPort: 8000 # metrics
+
+      volumes:
+        - name: config
+          configMap:
+            name: chaos-config
