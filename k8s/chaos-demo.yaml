@@ -2,3 +2,39 @@ apiVersion: v1
 kind: Namespace
 metadata:
   name: chaos-demo
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: chaos-config
+  namespace: chaos-demo
+data:
+  config.yaml: |
+    agent:
+      interval_seconds: 15
+      dry_run: false
+
+    failures:
+      cpu:
+        enabled: true
+        duration_seconds: 8
+        probability: 0.4
+        cores: 2
+
+      memory:
+        enabled: false
+        duration_seconds: 10
+        probability: 0.2
+        mb: 300
+
+      process:
+        enabled: true
+        target_name: "python"
+        probability: 0.5
+
+      network:
+        enabled: true
+        interface: "eth0"
+        delay_ms: 500
+        duration_seconds: 12
+        probability: 0.3
