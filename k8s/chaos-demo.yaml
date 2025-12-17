@@ -58,11 +58,13 @@ spec:
       containers:
         - name: target-app
           image: target-app:latest
+          imagePullPolicy: Never
           ports:
             - containerPort: 8080
 
         - name: chaos-agent
           image: py-chaos-agent:latest
+          imagePullPolicy: Never
           volumeMounts:
             - name: config
               mountPath: /app/config.yaml
