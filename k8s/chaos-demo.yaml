@@ -38,3 +38,20 @@ data:
         delay_ms: 500
         duration_seconds: 12
         probability: 0.3
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: resilient-app
+  namespace: chaos-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: resilient-app
+  template:
+    metadata:
+      labels:
+        app: resilient-app
+    spec:
+      containers: []
