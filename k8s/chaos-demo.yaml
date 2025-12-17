@@ -54,6 +54,7 @@ spec:
       labels:
         app: resilient-app
     spec:
+      shareProcessNamespace: true # CRITICAL: allows sidecar to see/kill app processes
       containers:
         - name: target-app
           image: target-app:latest
@@ -66,6 +67,9 @@ spec:
             - name: config
               mountPath: /app/config.yaml
               subPath: config.yaml
+          securityContext:
+            capabilities:
+              add: ["NET_ADMIN"] # Required for tc
           ports:
             - containerPort: 8000 # metrics
 
