@@ -54,4 +54,8 @@ spec:
       labels:
         app: resilient-app
     spec:
-      containers: []
+      containers:
+        - name: target-app
+          image: target-app:latest
+          ports:
+            - containerPort: 8080
