@@ -1,8 +1,11 @@
 import time
 import random
 import importlib
+import signal
+import sys
 from .config import load_config
 from .metrics import start_metrics_server
+from .failures.network import cleanup_network_rules
 
 FAILURE_MODULES = {
     'cpu': '.failures.cpu',
@@ -11,9 +14,37 @@ FAILURE_MODULES = {
     'network': '.failures.network'
 }
 
+# Track configured interfaces for cleanup
+_configured_interfaces = set()
+
+def cleanup_on_exit():
+    """Clean up any active network rules on shutdown."""
+    print("[AGENT] Performing cleanup on shutdown...")
+    for interface in _configured_interfaces:
+        cleanup_network_rules(interface)
+        print(f"[AGENT] Cleaned up network rules on {interface}")
+
+def signal_handler(sig, frame):
+    """Handle shutdown signals gracefully."""
+    print(f"\n[AGENT] Received signal {sig}, shutting down...")
+    cleanup_on_exit()
+    sys.exit(0)
+
 def main():
     print("[AGENT] Starting Py-Chaos-Agent...")
     config = load_config()
+    
+    # Register signal handlers for graceful shutdown
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+    
+    print("[AGENT] Performing startup cleanup...")
+    if 'network' in config.failures and config.failures['network']['enabled']:
+        interface = config.failures['network'].get('interface', 'eth0')
+        _configured_interfaces.add(interface)
+        cleanup_network_rules(interface)
+        print(f"[AGENT] Cleaned up any existing network rules on {interface}")
+    
     start_metrics_server()
 
     print(f"[CONFIG] Interval: {config.agent.interval_seconds}s | Dry Run: {config.agent.dry_run}")
