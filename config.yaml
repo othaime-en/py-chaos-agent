@@ -17,7 +17,7 @@ failures:
 
   process:
     enabled: true
-    target_name: "python" # or "nginx", "node", etc.
+    target_name: "target-app" # or "nginx", "node", etc.
     probability: 0.4
 
   network:
