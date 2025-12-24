@@ -1,0 +1,20 @@
+version: '3.8'
+services:
+  target-app:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.target
+    ports:
+      - "8080:8080"
+
+  chaos-agent:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    privileged: true
+    network_mode: "service:target-app"
+    pid: "service:target-app"
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+    ports:
+      - "8000:8000"
