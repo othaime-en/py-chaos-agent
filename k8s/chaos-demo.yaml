@@ -29,7 +29,7 @@ data:
 
       process:
         enabled: true
-        target_name: "python"
+        target_name: "target-app"
         probability: 0.5
 
       network:
