@@ -3,6 +3,13 @@ from src.failures.cpu import inject_cpu
 from src.failures.memory import inject_memory
 from src.metrics import INJECTIONS_TOTAL
 
+@pytest.fixture(autouse=True)
+def reset_metrics():
+    """Reset Prometheus metrics before each test."""
+    # Clear all metrics by resetting the registry
+    INJECTIONS_TOTAL._metrics.clear()
+    yield
+
 @pytest.mark.parametrize("cores", [1, 2])
 def test_inject_cpu_dry_run(cores, capsys):
     config = {
