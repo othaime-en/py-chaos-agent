@@ -14,3 +14,4 @@ internal/
 .DS_Store
 Thumbs.db
 *.log
+.coverage
