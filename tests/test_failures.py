@@ -3,6 +3,7 @@ import pytest
 import time
 from unittest.mock import patch, MagicMock
 from src.failures.cpu import inject_cpu
+from src.failures.memory import inject_memory
 from src.metrics import INJECTIONS_TOTAL, INJECTION_ACTIVE
 
 class TestCPUFailures:
@@ -62,3 +63,58 @@ class TestCPUFailures:
         # Should complete immediately without error
         captured = capsys.readouterr()
         assert "[CPU] Hogging" in captured.out
+
+class TestMemoryFailures:
+    """Test memory failure injection."""
+
+    def test_inject_memory_dry_run(self, capsys):
+        """Test memory injection in dry run mode."""
+        config = {'duration_seconds': 1, 'mb': 50}
+        inject_memory(config, dry_run=True)
+        captured = capsys.readouterr()
+        assert "DRY RUN] Would allocate 50 MB" in captured.out
+        assert INJECTIONS_TOTAL.labels(failure_type='memory', status='skipped')._value.get() == 1
+
+    @pytest.mark.parametrize("mb", [10, 50, 100])
+    def test_inject_memory_various_sizes(self, mb, capsys):
+        """Test memory injection with different sizes in dry run."""
+        config = {'duration_seconds': 1, 'mb': mb}
+        inject_memory(config, dry_run=True)
+        captured = capsys.readouterr()
+        assert f"Would allocate {mb} MB" in captured.out
+
+    def test_inject_memory_actual_small(self, capsys):
+        """Test actual memory injection with small allocation."""
+        config = {'duration_seconds': 1, 'mb': 10}
+        inject_memory(config, dry_run=False)
+        time.sleep(1.5)  # Wait for thread to complete
+        
+        captured = capsys.readouterr()
+        assert "[MEMORY] Starting memory injection" in captured.out
+        # Check that it eventually completes
+        assert INJECTIONS_TOTAL.labels(failure_type='memory', status='success')._value.get() == 1
+
+    def test_inject_memory_default_value(self, capsys):
+        """Test memory injection with default MB value."""
+        config = {'duration_seconds': 1}
+        inject_memory(config, dry_run=True)
+        captured = capsys.readouterr()
+        assert "100 MB" in captured.out  # Default is 100
+
+    def test_inject_memory_threaded_behavior(self):
+        """Test that memory injection doesn't block the main thread."""
+        config = {'duration_seconds': 2, 'mb': 10}
+        
+        start = time.time()
+        inject_memory(config, dry_run=False)
+        elapsed = time.time() - start
+        
+        # Should return immediately (not block for 2 seconds)
+        assert elapsed < 0.5
+
+    def test_memory_zero_size(self, capsys):
+        """Test memory injection with zero MB."""
+        config = {'duration_seconds': 1, 'mb': 0}
+        inject_memory(config, dry_run=True)
+        captured = capsys.readouterr()
+        assert "0 MB" in captured.out
