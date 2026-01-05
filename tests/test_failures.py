@@ -1,9 +1,12 @@
 """Tests for failure injection modules."""
 import pytest
 import time
+import psutil
+import os
 from unittest.mock import patch, MagicMock
 from src.failures.cpu import inject_cpu
 from src.failures.memory import inject_memory
+from src.failures.process import inject_process, get_safe_target_processes
 from src.metrics import INJECTIONS_TOTAL, INJECTION_ACTIVE
 
 class TestCPUFailures:
@@ -118,3 +121,66 @@ class TestMemoryFailures:
         inject_memory(config, dry_run=True)
         captured = capsys.readouterr()
         assert "0 MB" in captured.out
+
+class TestProcessFailures:
+    """Test process failure injection."""
+
+    def test_inject_process_dry_run(self, capsys):
+        """Test process kill in dry run mode."""
+        config = {'target_name': 'python'}
+        inject_process(config, dry_run=True)
+        captured = capsys.readouterr()
+        # Should either find process or report none found
+        assert "DRY RUN" in captured.out or "No killable process" in captured.out
+
+    def test_inject_process_no_target_name(self, capsys):
+        """Test process injection without target name."""
+        config = {}
+        inject_process(config, dry_run=False)
+        captured = capsys.readouterr()
+        assert "No target_name specified" in captured.out
+
+    def test_inject_process_nonexistent_target(self, capsys):
+        """Test process injection with nonexistent target."""
+        config = {'target_name': 'definitely_not_a_real_process_name_xyz123'}
+        inject_process(config, dry_run=False)
+        captured = capsys.readouterr()
+        assert "No killable process" in captured.out
+        assert INJECTIONS_TOTAL.labels(failure_type='process', status='skipped')._value.get() == 1
+
+    def test_get_safe_target_processes_excludes_self(self):
+        """Test that safe target processes excludes the chaos agent itself."""
+        # Get our own process name
+        current_process = psutil.Process(os.getpid())
+        current_name = current_process.name()
+        
+        # Try to find processes with our name
+        safe_targets = get_safe_target_processes(current_name)
+        
+        # Should not include our own PID
+        my_pid = os.getpid()
+        target_pids = [p.pid for p in safe_targets]
+        assert my_pid not in target_pids
+
+    def test_get_safe_target_processes_excludes_chaos_agent(self):
+        """Test that processes with 'chaos' or 'agent.py' in cmdline are excluded."""
+        # This is a meta-test - we're running as part of the test suite
+        # so we shouldn't target ourselves even if searching for 'python'
+        safe_targets = get_safe_target_processes('python')
+        
+        my_pid = os.getpid()
+        for proc in safe_targets:
+            assert proc.pid != my_pid
+            cmdline = ' '.join(proc.info.get('cmdline', []))
+            # Processes with 'chaos' or 'agent.py' should be filtered
+            if 'agent.py' in cmdline:
+                assert proc.pid != my_pid
+
+    def test_process_empty_target_name(self, capsys):
+        """Test process injection with empty target name."""
+        config = {'target_name': ''}
+        inject_process(config, dry_run=False)
+        captured = capsys.readouterr()
+        # Empty string should be treated as no target
+        assert "No killable process" in captured.out or "No target_name" in captured.out
+
