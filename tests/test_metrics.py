@@ -1,4 +1,3 @@
-import pytest
 from src.metrics import INJECTIONS_TOTAL, INJECTION_ACTIVE
 from src.failures.cpu import inject_cpu
 

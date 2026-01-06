@@ -1,6 +1,5 @@
 import multiprocessing
 import time
-import psutil
 from ..metrics import INJECTIONS_TOTAL, INJECTION_ACTIVE
 
 

@@ -1,6 +1,5 @@
 """Integration tests combining multiple components."""
 
-import pytest
 from src.config import load_config
 from src.failures.cpu import inject_cpu
 from src.failures.memory import inject_memory
