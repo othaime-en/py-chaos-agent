@@ -1,4 +1,5 @@
 """Shared fixtures and configuration for all tests."""
+
 import pytest
 from src.metrics import INJECTIONS_TOTAL, INJECTION_ACTIVE
 
