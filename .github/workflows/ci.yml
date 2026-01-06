@@ -27,7 +27,7 @@ jobs:
           source venv/bin/activate
           black --check src tests
           flake8 src tests
-          mypy src
+          mypy src --install-types --non-interactive
 
       - name: Test with coverage
         run: |

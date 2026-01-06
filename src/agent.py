@@ -15,7 +15,7 @@ FAILURE_MODULES = {
 }
 
 # Track configured interfaces for cleanup
-_configured_interfaces = set()
+_configured_interfaces: set[str] = set()
 
 
 def cleanup_on_exit():
