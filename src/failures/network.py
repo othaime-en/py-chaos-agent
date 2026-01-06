@@ -1,6 +1,5 @@
 import subprocess
 import time
-import atexit
 from ..metrics import INJECTIONS_TOTAL, INJECTION_ACTIVE
 
 
