@@ -60,7 +60,7 @@ def inject_memory(config: dict, dry_run: bool = False):
             print(f"[MEMORY] Failed: {e}")
         finally:
             INJECTION_ACTIVE.labels(failure_type="memory").set(0)
-            print(f"[MEMORY] Memory injection completed")
+            print("[MEMORY] Memory injection completed")
 
     # Run in daemon thread so it doesn't block other injections
     thread = threading.Thread(target=_injection_thread, daemon=True)
