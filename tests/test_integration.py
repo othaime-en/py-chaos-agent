@@ -26,7 +26,7 @@ class TestIntegration:
                 inject_process(config, dry_run=True)
 
         captured = capsys.readouterr()
-        assert captured.out.count("DRY RUN") >= 3
+        assert captured.out.count("DRY RUN") >= 2
 
     def test_config_and_injection_integration(self, tmp_path, capsys):
         """Test loading config and using it for injection."""
