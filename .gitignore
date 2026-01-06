@@ -14,4 +14,11 @@ internal/
 .DS_Store
 Thumbs.db
 *.log
+
+# Testing
+.pytest_cache/
 .coverage
+.coverage.*
+coverage.xml
+coverage.json
+htmlcov/
