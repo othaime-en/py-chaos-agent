@@ -22,3 +22,14 @@ Thumbs.db
 coverage.xml
 coverage.json
 htmlcov/
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.tfstate.lock.info
+crash.log
+override.tf
+override.tf.json
+*.tfvars
+
