@@ -394,3 +394,123 @@ network:
 ```
 
 ## Complete Configuration Examples
+
+### Conservative Testing
+
+For initial resilience testing in non-critical environments:
+
+```yaml
+agent:
+  interval_seconds: 30
+  dry_run: false
+
+failures:
+  cpu:
+    enabled: true
+    probability: 0.2
+    duration_seconds: 5
+    cores: 1
+
+  memory:
+    enabled: true
+    probability: 0.15
+    duration_seconds: 8
+    mb: 100
+
+  process:
+    enabled: false # Disabled for initial testing
+
+  network:
+    enabled: true
+    probability: 0.2
+    duration_seconds: 10
+    interface: "eth0"
+    delay_ms: 150
+```
+
+### Aggressive Testing
+
+For chaos engineering in robust test environments:
+
+```yaml
+agent:
+  interval_seconds: 10
+  dry_run: false
+
+failures:
+  cpu:
+    enabled: true
+    probability: 0.5
+    duration_seconds: 8
+    cores: 2
+
+  memory:
+    enabled: true
+    probability: 0.4
+    duration_seconds: 12
+    mb: 300
+
+  process:
+    enabled: true
+    probability: 0.3
+    target_name: "target-app"
+
+  network:
+    enabled: true
+    probability: 0.4
+    duration_seconds: 15
+    interface: "eth0"
+    delay_ms: 400
+```
+
+### Process-Only Testing
+
+For testing application restart and recovery:
+
+```yaml
+agent:
+  interval_seconds: 20
+  dry_run: false
+
+failures:
+  cpu:
+    enabled: false
+
+  memory:
+    enabled: false
+
+  process:
+    enabled: true
+    probability: 0.8
+    target_name: "myapp"
+
+  network:
+    enabled: false
+```
+
+### Network-Only Testing
+
+For testing distributed system behavior under latency:
+
+```yaml
+agent:
+  interval_seconds: 15
+  dry_run: false
+
+failures:
+  cpu:
+    enabled: false
+
+  memory:
+    enabled: false
+
+  process:
+    enabled: false
+
+  network:
+    enabled: true
+    probability: 0.6
+    duration_seconds: 20
+    interface: "eth0"
+    delay_ms: 300
+```
