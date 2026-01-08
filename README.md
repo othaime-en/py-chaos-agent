@@ -56,6 +56,43 @@ kubectl port-forward -n chaos-demo svc/resilient-app 8000:8000
 curl http://localhost:8000/metrics
 ```
 
+## Configuration
+
+Configure chaos experiments via `config.yaml`:
+
+```yaml
+agent:
+  interval_seconds: 10 # How often to potentially inject failures
+  dry_run: false # Set to true to test without actual injection
+
+failures:
+  cpu:
+    enabled: true
+    duration_seconds: 5
+    probability: 0.3 # 30% chance per interval
+    cores: 1
+
+  memory:
+    enabled: true
+    duration_seconds: 8
+    probability: 0.2
+    mb: 200
+
+  process:
+    enabled: true
+    target_name: "target-app"
+    probability: 0.4
+
+  network:
+    enabled: true
+    interface: "eth0"
+    delay_ms: 300
+    duration_seconds: 10
+    probability: 0.25
+```
+
+See [Configuration Guide](docs/configuration.md) for detailed options.
+
 ## License
 
 MIT License - see [LICENSE](LICENSE) file for details.
