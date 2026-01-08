@@ -514,3 +514,99 @@ failures:
     interface: "eth0"
     delay_ms: 300
 ```
+
+## Configuration in Kubernetes
+
+### Using ConfigMaps
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: chaos-config
+data:
+  config.yaml: |
+    agent:
+      interval_seconds: 15
+      dry_run: false
+    failures:
+      # ... your configuration
+```
+
+Mount as volume:
+
+```yaml
+volumes:
+  - name: config
+    configMap:
+      name: chaos-config
+
+volumeMounts:
+  - name: config
+    mountPath: /app/config.yaml
+    subPath: config.yaml
+```
+
+### Dynamic Updates
+
+To update configuration without restarting pods:
+
+```bash
+# Edit ConfigMap
+kubectl edit configmap chaos-config -n chaos-demo
+
+# Delete pod to pick up new config
+kubectl delete pod -n chaos-demo -l app=resilient-app
+```
+
+## Best Practices
+
+1. **Start with dry-run:** Always test configuration with `dry_run: true` first
+
+2. **Gradual probability increase:** Begin with low probabilities (0.1-0.2) and increase gradually
+
+3. **Monitor during testing:** Watch metrics and application logs during chaos experiments
+
+4. **Document baselines:** Record normal system behavior before introducing chaos
+
+5. **Single failure type:** Test one failure type at a time initially
+
+6. **Reasonable durations:** Keep durations short (5-15 seconds) for most scenarios
+
+7. **Consider dependencies:** Account for application startup time when configuring process kills
+
+8. **Network interface verification:** Confirm correct interface name before network testing
+
+9. **Resource awareness:** Don't allocate more resources than available (especially memory)
+
+10. **Version control:** Keep configurations in git with descriptive commit messages
+
+## Troubleshooting
+
+### Configuration not loading
+
+```bash
+# Verify YAML syntax
+python -c "import yaml; yaml.safe_load(open('config.yaml'))"
+
+# Check file permissions
+ls -l config.yaml
+
+# Verify mount in Kubernetes
+kubectl exec -it <pod-name> -c chaos-agent -- cat /app/config.yaml
+```
+
+### Chaos not triggering
+
+- Check `enabled: true` for desired failure types
+- Verify probability is > 0
+- Confirm dry_run is `false`
+- Check agent logs for error messages
+- Verify required capabilities (NET_ADMIN for network)
+
+### Unexpected behavior
+
+- Review probability calculations (multiply probability × checks per minute)
+- Confirm durations aren't overlapping
+- Check for resource constraints on chaos agent pod
+- Verify target names match actual processes
