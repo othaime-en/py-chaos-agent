@@ -13,7 +13,7 @@
 
 ```bash
 # Clone the repository
-git clone https://github.com/othaime-en/py-chaos-agent.git
+git clone https://github.com/yourusername/py-chaos-agent.git
 cd py-chaos-agent
 
 # Create virtual environment
@@ -338,3 +338,275 @@ def test_network_injection(self, mock_run_cmd):
     # Verify command was called correctly
     mock_run_cmd.assert_called()
 ```
+
+## Code Style Guide
+
+### Python Style
+
+Follow PEP 8 with these specifics:
+
+- Line length: 100 characters (configured in .flake8)
+- Use type hints where appropriate
+- Docstrings for public functions
+- Descriptive variable names
+
+```python
+# Good
+def inject_cpu(config: dict, dry_run: bool = False) -> None:
+    """
+    Inject CPU stress by spawning worker processes.
+
+    Args:
+        config: Configuration dictionary with 'cores' and 'duration_seconds'
+        dry_run: If True, log actions without executing
+    """
+    cores = config.get("cores", 1)
+    duration = config["duration_seconds"]
+    # ...
+
+# Bad
+def inject(c, d=False):
+    n = c.get("cores", 1)
+    t = c["duration_seconds"]
+    # ...
+```
+
+### Commit Messages
+
+Follow conventional commits:
+
+```bash
+# Good commits
+git commit -m "feat: add disk I/O failure injection"
+git commit -m "fix: prevent self-termination in process killer"
+git commit -m "docs: update configuration reference"
+git commit -m "test: add tests for network cleanup"
+git commit -m "refactor: extract common injection logic"
+
+# Bad commits
+git commit -m "updates"
+git commit -m "fix bug"
+git commit -m "WIP"
+```
+
+### Branch Naming
+
+```bash
+# Feature branches
+git checkout -b feature/disk-io-chaos
+
+# Bug fixes
+git checkout -b fix/memory-leak-in-injector
+
+# Documentation
+git checkout -b docs/add-examples
+
+# Refactoring
+git checkout -b refactor/simplify-config-loading
+```
+
+## Debugging Tips
+
+### Common Issues
+
+**1. Import errors**
+
+```bash
+# Ensure you're running from project root
+python -m src.agent
+
+# Not: python src/agent.py (breaks relative imports)
+```
+
+**2. Metrics not updating**
+
+```python
+# Verify metrics are registered
+from src.metrics import INJECTIONS_TOTAL
+print(INJECTIONS_TOTAL._metrics)
+
+# Check if labels match
+INJECTIONS_TOTAL.labels(failure_type="cpu", status="success").inc()
+```
+
+**3. Tests failing inconsistently**
+
+```python
+# Reset metrics between tests (should be in conftest.py)
+@pytest.fixture(autouse=True)
+def reset_metrics():
+    INJECTIONS_TOTAL._metrics.clear()
+    INJECTION_ACTIVE._metrics.clear()
+    yield
+```
+
+**4. Docker networking issues**
+
+```bash
+# Inspect network
+docker network ls
+docker network inspect py-chaos-agent_default
+
+# Check if containers can reach each other
+docker exec chaos-agent ping target-app
+```
+
+### Logging
+
+Add debug logging for development:
+
+```python
+import logging
+
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
+
+def inject_cpu(config: dict, dry_run: bool = False):
+    logger.debug(f"CPU injection called with config: {config}")
+    # ...
+```
+
+## Performance Profiling
+
+```bash
+# Profile CPU usage
+python -m cProfile -o profile.stats -m src.agent
+
+# Analyze results
+python -c "import pstats; p = pstats.Stats('profile.stats'); p.sort_stats('cumtime'); p.print_stats(20)"
+
+# Memory profiling
+pip install memory_profiler
+python -m memory_profiler src/agent.py
+```
+
+## CI/CD Pipeline
+
+### GitHub Actions Workflow
+
+The `.github/workflows/ci.yml` runs:
+
+1. **Lint**: Black, flake8, mypy
+2. **Test**: pytest with coverage
+3. **Coverage report**: Uploaded to codecov (optional)
+
+### Running CI Locally
+
+```bash
+# Install act (GitHub Actions locally)
+# https://github.com/nektos/act
+
+# Run the CI workflow
+act -j test
+```
+
+### Pre-commit Hooks
+
+```bash
+# Install pre-commit
+pip install pre-commit
+
+# Create .pre-commit-config.yaml
+cat > .pre-commit-config.yaml <<EOF
+repos:
+  - repo: https://github.com/psf/black
+    rev: 23.12.1
+    hooks:
+      - id: black
+
+  - repo: https://github.com/pycqa/flake8
+    rev: 7.0.0
+    hooks:
+      - id: flake8
+
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.8.0
+    hooks:
+      - id: mypy
+        additional_dependencies: [types-PyYAML]
+EOF
+
+# Install hooks
+pre-commit install
+
+# Now black, flake8, mypy run automatically on commit
+```
+
+## Contributing
+
+### Pull Request Process
+
+1. **Fork and clone** the repository
+2. **Create feature branch** from `main`
+3. **Make changes** following code style guide
+4. **Add tests** for new functionality
+5. **Run test suite** and ensure all pass
+6. **Update documentation** if needed
+7. **Submit pull request** with clear description
+
+### Pull Request Template
+
+```markdown
+## Description
+
+Brief description of changes
+
+## Type of Change
+
+- [ ] Bug fix
+- [ ] New feature
+- [ ] Breaking change
+- [ ] Documentation update
+
+## Testing
+
+- [ ] Added unit tests
+- [ ] Added integration tests
+- [ ] All tests pass locally
+
+## Checklist
+
+- [ ] Code follows style guidelines
+- [ ] Self-review completed
+- [ ] Comments added for complex logic
+- [ ] Documentation updated
+- [ ] No new warnings generated
+```
+
+## Release Process
+
+1. **Update version** in `setup.py` (if exists) or release notes
+2. **Update CHANGELOG.md** with changes
+3. **Create git tag**:
+   ```bash
+   git tag -a v1.0.0 -m "Release version 1.0.0"
+   git push origin v1.0.0
+   ```
+4. **Build Docker images** with version tag
+5. **Create GitHub release** with release notes
+
+## Resources
+
+### Python Tools
+
+- [Black Documentation](https://black.readthedocs.io/)
+- [flake8 Documentation](https://flake8.pycqa.org/)
+- [mypy Documentation](https://mypy.readthedocs.io/)
+- [pytest Documentation](https://docs.pytest.org/)
+
+### Docker
+
+- [Docker Best Practices](https://docs.docker.com/develop/dev-best-practices/)
+- [Docker Compose Documentation](https://docs.docker.com/compose/)
+
+### Kubernetes
+
+- [Kubernetes Documentation](https://kubernetes.io/docs/)
+- [kubectl Cheat Sheet](https://kubernetes.io/docs/reference/kubectl/cheatsheet/)
+
+## Getting Help
+
+- **Issues**: Open GitHub issues for bugs or feature requests
+- **Discussions**: Use GitHub discussions for questions
+- **Documentation**: Check docs/ folder for detailed guides
+- **Examples**: See examples/ folder for use cases
