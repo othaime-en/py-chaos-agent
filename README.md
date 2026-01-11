@@ -1,6 +1,6 @@
 # Py-Chaos-Agent
 
-![CI/CD](https://github.com/othaime-en/py-chaos-agent/workflows/CI/CD/badge.svg)
+![CI/CD](https://github.com/yourusername/py-chaos-agent/workflows/CI/CD/badge.svg)
 ![Python](https://img.shields.io/badge/python-3.10-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Coverage](https://img.shields.io/badge/coverage-92%25-brightgreen)
@@ -92,6 +92,85 @@ failures:
 ```
 
 See [Configuration Guide](docs/configuration.md) for detailed options.
+
+## Architecture
+
+Py-Chaos-Agent runs as a sidecar container in Kubernetes, sharing the process and network namespaces with your target application. This allows it to inject failures while maintaining isolation from other pods.
+
+```
+┌─────────────────────────────────────┐
+│           Kubernetes Pod            │
+├─────────────────┬───────────────────┤
+│  Target App     │  Chaos Agent      │
+│  (port 8080)    │  (port 8000)      │
+│                 │                   │
+│  Shares: Process Namespace          │
+│          Network Namespace          │
+└─────────────────────────────────────┘
+```
+
+See [Architecture Documentation](docs/architecture.md) for detailed design.
+
+## Safety and Ethics
+
+**WARNING**: This tool is designed for testing environments only.
+
+- Only use on systems you own or have explicit permission to test
+- Never run in production without proper safeguards and approval
+- Start with dry-run mode to verify behavior
+- Monitor systems closely during chaos experiments
+- Have rollback procedures ready
+
+The agent includes self-protection mechanisms to avoid terminating itself, but always exercise caution when running chaos experiments.
+
+## Development
+
+### Prerequisites
+
+- Python 3.10+
+- Docker and Docker Compose
+- kubectl (for Kubernetes testing)
+- Terraform (for AWS deployment)
+
+### Setup
+
+```bash
+# Create virtual environment
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+
+# Install dependencies
+pip install -r requirements.txt -r requirements-dev.txt
+
+# Run tests
+pytest
+
+# Run tests with coverage
+pytest --cov=src --cov-report=html
+
+# Lint and format
+black src tests
+flake8 src tests
+mypy src
+```
+
+### Running Tests
+
+```bash
+# Run all tests
+pytest
+
+# Run with verbose output
+pytest -v
+
+# Run specific test file
+pytest tests/test_failures.py
+
+# Run with coverage
+pytest --cov=src --cov-report=term-missing
+```
+
+See [Development Guide](docs/development.md) for contribution guidelines.
 
 ## License
 
