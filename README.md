@@ -1,6 +1,6 @@
 # Py-Chaos-Agent
 
-![CI/CD](https://github.com/yourusername/py-chaos-agent/workflows/CI/CD/badge.svg)
+![CI/CD](https://github.com/othaime-en/py-chaos-agent/workflows/CI/CD/badge.svg)
 ![Python](https://img.shields.io/badge/python-3.10-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Coverage](https://img.shields.io/badge/coverage-92%25-brightgreen)
