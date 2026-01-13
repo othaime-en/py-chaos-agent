@@ -59,6 +59,8 @@ nav:
   - User Guide:
       - Architecture: user-guide/architecture.md
       - Monitoring: user-guide/monitoring.md
+      - Kubernetes Deployment: user-guide/kubernetes.md
+      - Failure Modes: user-guide/failure-modes.md
   - Development:
       - Contributing: development/contributing.md
   - Reference:
