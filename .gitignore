@@ -14,6 +14,7 @@ internal/
 .DS_Store
 Thumbs.db
 *.log
+site/
 
 # Testing
 .pytest_cache/
