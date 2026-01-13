@@ -1,0 +1,74 @@
+site_name: Py-Chaos-Agent Documentation
+site_description: A Python-based chaos engineering sidecar tool for testing containerized applications
+site_author: othaime-en
+site_url: https://othaime-en.github.io/py-chaos-agent/
+
+repo_name: othaime-en/py-chaos-agent
+repo_url: https://github.com/othaime-en/py-chaos-agent
+edit_uri: edit/main/docs/
+
+theme:
+  name: shadcn
+  palette:
+    scheme: slate
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.annotate
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+
+markdown_extensions:
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - admonition
+  - pymdownx.details
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+
+nav:
+  - Home: index.md
+  - Getting Started:
+      - Installation: getting-started/installation.md
+      - Quick Start: getting-started/quickstart.md
+      - Configuration: getting-started/configuration.md
+  - User Guide:
+      - Architecture: user-guide/architecture.md
+      - Monitoring: user-guide/monitoring.md
+  - Development:
+      - Contributing: development/contributing.md
+  - Reference:
+      - API Reference: reference/api.md
+      - Configuration Schema: reference/config-schema.md
+      - Metrics: reference/metrics.md
+  - Safety & Ethics: safety.md
+  - FAQ: faq.md
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/othaime-en/py-chaos-agent
