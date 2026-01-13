@@ -167,3 +167,171 @@ Exposes Prometheus metrics for observability.
 ```
 
 ## Kubernetes Integration
+
+### Security Context
+
+The chaos agent requires elevated privileges:
+
+```yaml
+securityContext:
+  capabilities:
+    add: ["NET_ADMIN"] # For network chaos via tc command
+```
+
+### Namespace Sharing
+
+```yaml
+spec:
+  shareProcessNamespace: true # Allows sidecar to see app processes
+```
+
+This is critical for process termination chaos to work correctly.
+
+### Volume Mounts
+
+Configuration is mounted as a ConfigMap:
+
+```yaml
+volumes:
+  - name: config
+    configMap:
+      name: chaos-config
+
+volumeMounts:
+  - name: config
+    mountPath: /app/config.yaml
+    subPath: config.yaml
+```
+
+## Safety Mechanisms
+
+### Self-Protection
+
+The process killer includes logic to avoid terminating itself:
+
+1. Records own PID and parent PID
+2. Scans for all child processes
+3. Adds all to protected list
+4. Filters out any process matching "chaos" or "agent.py" in command line
+5. Only targets processes not in protected list
+
+### Cleanup on Exit
+
+Signal handlers ensure graceful shutdown:
+
+```python
+signal.signal(signal.SIGTERM, signal_handler)
+signal.signal(signal.SIGINT, signal_handler)
+```
+
+On shutdown:
+
+- All network rules are removed
+- Active injections are logged
+- Metrics are flushed
+
+### Dry Run Mode
+
+All injection functions support dry-run mode:
+
+- Logs what would happen
+- Updates metrics with "skipped" status
+- No actual system modifications
+
+## Extensibility
+
+### Adding New Failure Types
+
+1. Create new module in `src/failures/<type>.py`
+2. Implement `inject_<type>(config, dry_run)` function
+3. Add to `FAILURE_MODULES` dict in `agent.py`
+4. Add configuration section to `config.yaml`
+5. Add tests in `tests/test_failures.py`
+
+Example skeleton:
+
+```python
+# src/failures/disk.py
+from ..metrics import INJECTIONS_TOTAL, INJECTION_ACTIVE
+
+def inject_disk(config: dict, dry_run: bool = False):
+    operation = config.get("operation", "fill")
+
+    if dry_run:
+        print(f"[DRY RUN] Would inject disk chaos: {operation}")
+        INJECTIONS_TOTAL.labels(failure_type="disk", status="skipped").inc()
+        return
+
+    print(f"[DISK] Injecting {operation}...")
+    INJECTION_ACTIVE.labels(failure_type="disk").set(1)
+
+    try:
+        # Implement disk chaos
+        INJECTIONS_TOTAL.labels(failure_type="disk", status="success").inc()
+    except Exception as e:
+        INJECTIONS_TOTAL.labels(failure_type="disk", status="failed").inc()
+        print(f"[DISK] Failed: {e}")
+    finally:
+        INJECTION_ACTIVE.labels(failure_type="disk").set(0)
+```
+
+## Performance Considerations
+
+### Memory Efficiency
+
+- Memory injection runs in separate thread to avoid blocking
+- CPU injection uses multiprocessing for true parallel execution
+- Network injection is non-blocking after tc command execution
+
+### Resource Limits
+
+Consider setting resource limits on the chaos agent pod:
+
+```yaml
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+```
+
+### Metrics Impact
+
+The metrics server runs in a daemon thread with minimal overhead. Typical memory footprint is under 50MB for the entire agent.
+
+## Dependencies
+
+### Runtime Dependencies
+
+- **psutil**: Process and system monitoring
+- **pyyaml**: Configuration parsing
+- **prometheus_client**: Metrics export
+
+### System Dependencies
+
+- **iproute2**: Provides `tc` command for network chaos
+- **procps**: Process utilities
+
+### Kubernetes Dependencies
+
+- **shareProcessNamespace**: Required for process chaos
+- **NET_ADMIN capability**: Required for network chaos
+
+## Limitations
+
+1. **Single namespace**: Only affects processes in the same pod
+2. **Linux only**: Relies on Linux-specific tools (tc, /proc)
+3. **No rollback**: Failed applications must recover naturally
+4. **Synchronous execution**: One failure type at a time per interval
+5. **Network interface**: Currently limited to single interface
+
+## Future Enhancements
+
+- Asynchronous injection for concurrent chaos
+- Custom failure plugins via Python entry points
+- gRPC API for external control
+- Chaos scheduling (cron-like syntax)
+- Multi-interface network chaos
+- Container-level resource limits manipulation
