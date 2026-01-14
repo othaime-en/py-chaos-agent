@@ -61,8 +61,9 @@ nav:
       - Monitoring: user-guide/monitoring.md
       - Kubernetes Deployment: user-guide/kubernetes.md
       - Failure Modes: user-guide/failure-modes.md
+      - Troubleshooting: troubleshooting.md
   - Development:
-      - Contributing: development/contributing.md
+      - Contributing: development/development.md
   - Reference:
       - API Reference: reference/api.md
       - Configuration Schema: reference/config-schema.md
