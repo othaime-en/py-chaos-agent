@@ -61,7 +61,7 @@ nav:
       - Monitoring: user-guide/monitoring.md
       - Kubernetes Deployment: user-guide/kubernetes.md
       - Failure Modes: user-guide/failure-modes.md
-      - Troubleshooting: troubleshooting.md
+      - Troubleshooting: user-guide/troubleshooting.md
   - Development:
       - Contributing: development/development.md
   - Reference:
