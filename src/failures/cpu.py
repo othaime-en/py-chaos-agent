@@ -13,20 +13,20 @@ def _worker(duration: int):
 def _cpu_hog(cores: int, duration: int):
     """
     Spawn multiple worker processes to consume CPU cores.
-    
+
     Ensures all processes are properly cleaned up even if exceptions occur.
     """
     procs = [
         multiprocessing.Process(target=_worker, args=(duration,)) for _ in range(cores)
     ]
-    
+
     try:
         for p in procs:
             p.start()
-        
+
         for p in procs:
             p.join()
-            
+
     except Exception as e:
         print(f"[CPU] Error during CPU hogging: {e}")
         for p in procs:
@@ -35,8 +35,8 @@ def _cpu_hog(cores: int, duration: int):
                 p.join(timeout=2)
                 if p.is_alive():
                     p.kill()
-        raise 
-    
+        raise
+
     finally:
         for p in procs:
             if p.is_alive():
@@ -47,7 +47,7 @@ def _cpu_hog(cores: int, duration: int):
 def inject_cpu(config: dict, dry_run: bool = False):
     """
     Inject CPU stress by spawning worker processes.
-    
+
     Args:
         config: Configuration dictionary with 'cores' and 'duration_seconds'
         dry_run: If True, log actions without executing
@@ -67,10 +67,10 @@ def inject_cpu(config: dict, dry_run: bool = False):
         _cpu_hog(cores, duration)
         INJECTIONS_TOTAL.labels(failure_type="cpu", status="success").inc()
         print(f"[CPU] Successfully completed {duration}s CPU stress")
-        
+
     except Exception as e:
         INJECTIONS_TOTAL.labels(failure_type="cpu", status="failed").inc()
         print(f"[CPU] Failed: {e}")
-        
+
     finally:
         INJECTION_ACTIVE.labels(failure_type="cpu").set(0)
