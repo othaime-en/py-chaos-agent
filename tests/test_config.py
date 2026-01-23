@@ -8,8 +8,7 @@ class TestConfigLoading:
     def test_load_config_valid(self, tmp_path):
         """Test loading a valid config file."""
         config_file = tmp_path / "config.yaml"
-        config_file.write_text(
-            """
+        config_file.write_text("""
 agent:
   interval_seconds: 10
   dry_run: false
@@ -19,8 +18,7 @@ failures:
     probability: 0.5
     duration_seconds: 5
     cores: 2
-        """
-        )
+        """)
 
         config = load_config(str(config_file))
         assert config.agent.interval_seconds == 10
@@ -32,8 +30,7 @@ failures:
     def test_load_config_with_dry_run(self, tmp_path):
         """Test config with dry_run enabled."""
         config_file = tmp_path / "config.yaml"
-        config_file.write_text(
-            """
+        config_file.write_text("""
 agent:
   interval_seconds: 5
   dry_run: true
@@ -43,8 +40,7 @@ failures:
     probability: 0.3
     duration_seconds: 2
     cores: 1
-        """
-        )
+        """)
 
         config = load_config(str(config_file))
         assert config.agent.dry_run is True
@@ -57,8 +53,7 @@ failures:
     def test_load_config_all_failures(self, tmp_path):
         """Test loading config with all failure types."""
         config_file = tmp_path / "config.yaml"
-        config_file.write_text(
-            """
+        config_file.write_text("""
 agent:
   interval_seconds: 15
   dry_run: false
@@ -83,8 +78,7 @@ failures:
     interface: "eth0"
     delay_ms: 300
     duration_seconds: 10
-        """
-        )
+        """)
 
         config = load_config(str(config_file))
         assert len(config.failures) == 4
@@ -96,8 +90,7 @@ failures:
     def test_load_config_disabled_failures(self, tmp_path):
         """Test config with disabled failure types."""
         config_file = tmp_path / "config.yaml"
-        config_file.write_text(
-            """
+        config_file.write_text("""
 agent:
   interval_seconds: 10
   dry_run: false
@@ -107,8 +100,7 @@ failures:
     probability: 0.5
     duration_seconds: 5
     cores: 2
-        """
-        )
+        """)
 
         config = load_config(str(config_file))
         assert config.failures["cpu"]["enabled"] is False

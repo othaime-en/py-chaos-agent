@@ -31,8 +31,7 @@ class TestIntegration:
     def test_config_and_injection_integration(self, tmp_path, capsys):
         """Test loading config and using it for injection."""
         config_file = tmp_path / "config.yaml"
-        config_file.write_text(
-            """
+        config_file.write_text("""
 agent:
   interval_seconds: 10
   dry_run: true
@@ -42,8 +41,7 @@ failures:
     probability: 0.5
     duration_seconds: 2
     cores: 1
-        """
-        )
+        """)
 
         config = load_config(str(config_file))
         cpu_config = config.failures["cpu"]
@@ -58,8 +56,7 @@ failures:
     def test_multiple_failure_types_from_config(self, tmp_path):
         """Test loading and validating config with multiple failure types."""
         config_file = tmp_path / "config.yaml"
-        config_file.write_text(
-            """
+        config_file.write_text("""
 agent:
   interval_seconds: 15
   dry_run: true
@@ -84,8 +81,7 @@ failures:
     interface: "eth0"
     delay_ms: 300
     duration_seconds: 10
-        """
-        )
+        """)
 
         config = load_config(str(config_file))
 
