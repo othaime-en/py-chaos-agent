@@ -63,6 +63,11 @@ def verify_interface_exists(interface: str) -> Tuple[bool, str]:
     Returns:
         tuple: (exists: bool, error_message: str or None)
     """
+    import sys
+
+    if sys.platform == "win32":
+        return True, None
+
     try:
         # Use ip link show with exact interface name (no shell injection possible)
         result = subprocess.run(
@@ -76,13 +81,15 @@ def verify_interface_exists(interface: str) -> Tuple[bool, str]:
             return True, None
         else:
             return False, f"Interface '{interface}' does not exist"
-            
+
+    except FileNotFoundError:
+        return True, None #ip command not found - probably not on linux        
     except subprocess.TimeoutExpired:
         return False, f"Timeout checking interface '{interface}'"
     except Exception as e:
         return False, f"Error checking interface: {e}"
 
-def _run_cmd_safe(args: list) -> subprocess.CompletedProcess:
+def _run_cmd(args: list) -> subprocess.CompletedProcess:
     """
     Execute command safely without shell interpretation.
     
@@ -123,7 +130,7 @@ def cleanup_network_rules(interface="eth0"):
         return False, error
     
     # use list of args instead of shell string
-    result = _run_cmd_safe(["tc", "qdisc", "del", "dev", interface, "root"])
+    result = _run_cmd(["tc", "qdisc", "del", "dev", interface, "root"])
     
     if result.returncode == 0:
         return True, None
@@ -186,7 +193,7 @@ def inject_network(config: dict, dry_run: bool = False):
             raise Exception(f"Pre-cleanup failed: {error}")
 
         #use safe command execution (no shell)
-        result = _run_cmd_safe([
+        result = _run_cmd([
             "tc", "qdisc", "add", 
             "dev", interface,
             "root", "netem", "delay", f"{delay_ms}ms"
