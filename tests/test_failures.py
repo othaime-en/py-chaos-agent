@@ -396,7 +396,7 @@ class TestNetworkFailures:
 
         success, error = cleanup_network_rules("eth999")
         assert success is False
-        assert "Cannot find device" in error
+        assert "does not exist" in error
 
     @patch("src.failures.network._run_cmd")
     def test_cleanup_network_rules_no_permissions(self, mock_run_cmd):
