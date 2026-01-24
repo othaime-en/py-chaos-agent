@@ -110,49 +110,66 @@ def _run_cmd_safe(args: list) -> subprocess.CompletedProcess:
 def cleanup_network_rules(interface="eth0"):
     """
     Remove any existing tc qdisc rules on the interface.
-
+    
     Returns:
         tuple: (success: bool, error_message: str or None)
     """
-    del_cmd = f"tc qdisc del dev {interface} root"
-    result = _run_cmd(del_cmd)
-
+    is_valid, error = validate_interface_name(interface)
+    if not is_valid:
+        return False, f"Invalid interface: {error}"
+    
+    exists, error = verify_interface_exists(interface)
+    if not exists:
+        return False, error
+    
+    # use list of args instead of shell string
+    result = _run_cmd_safe(["tc", "qdisc", "del", "dev", interface, "root"])
+    
     if result.returncode == 0:
         return True, None
-
-    # Check if the error is benign (no qdisc exists)
+    
+    # Check for benign errors
     stderr_lower = result.stderr.lower()
-
-    # These are expected errors when no rules exist - not a problem
     benign_errors = [
         "no such file or directory",
         "cannot delete qdisc with handle of zero",
-        "rtnetlink answers: no such file or directory",
-        "RTNETLINK answers: No such file or directory",
     ]
-
+    
     if any(err in stderr_lower for err in benign_errors):
         return True, None
-
-    error_msg = result.stderr.strip() or "Unknown error"
-
-    # Check for specific critical errors
-    if "cannot find device" in stderr_lower or "no such device" in stderr_lower:
-        return False, f"Interface '{interface}' does not exist"
-    elif "operation not permitted" in stderr_lower:
-        return False, "Permission denied - NET_ADMIN capability required"
-    elif "command not found" in stderr_lower or "tc: not found" in stderr_lower:
-        return False, "tc command not found - install iproute2 package"
-    else:
-        return False, f"Failed to cleanup: {error_msg}"
+    
+    return False, result.stderr.strip()
 
 
 def inject_network(config: dict, dry_run: bool = False):
+    """
+    Inject network latency using Linux traffic control (tc).
+    
+    Args:
+        config: Configuration with 'interface', 'delay_ms', 'duration_seconds'
+        dry_run: If True, validate but don't execute
+    """
     interface = config.get("interface", "eth0")
     delay_ms = config.get("delay_ms", 100)
     duration = config["duration_seconds"]
-
-    add_cmd = f"tc qdisc add dev {interface} root netem delay {delay_ms}ms"
+    
+    is_valid, error = validate_interface_name(interface)
+    if not is_valid:
+        print(f"[NETWORK] Validation failed: {error}")
+        INJECTIONS_TOTAL.labels(failure_type="network", status="failed").inc()
+        return
+    
+    is_valid, error = validate_delay_ms(delay_ms)
+    if not is_valid:
+        print(f"[NETWORK] Validation failed: {error}")
+        INJECTIONS_TOTAL.labels(failure_type="network", status="failed").inc()
+        return
+    
+    exists, error = verify_interface_exists(interface)
+    if not exists:
+        print(f"[NETWORK] {error}")
+        INJECTIONS_TOTAL.labels(failure_type="network", status="failed").inc()
+        return
 
     if dry_run:
         print(f"[DRY RUN] Would add {delay_ms}ms latency on {interface}")
@@ -163,28 +180,32 @@ def inject_network(config: dict, dry_run: bool = False):
     INJECTION_ACTIVE.labels(failure_type="network").set(1)
 
     try:
-        # Clean any existing rules first (idempotent operation)
+        # Clean any existing rules first
         success, error = cleanup_network_rules(interface)
         if not success:
             raise Exception(f"Pre-cleanup failed: {error}")
 
-        result = _run_cmd(add_cmd)
+        #use safe command execution (no shell)
+        result = _run_cmd_safe([
+            "tc", "qdisc", "add", 
+            "dev", interface,
+            "root", "netem", "delay", f"{delay_ms}ms"
+        ])
+        
         if result.returncode != 0:
             raise Exception(f"Failed to add delay: {result.stderr}")
 
         INJECTIONS_TOTAL.labels(failure_type="network", status="success").inc()
-
         time.sleep(duration)
 
     except Exception as e:
         INJECTIONS_TOTAL.labels(failure_type="network", status="failed").inc()
         print(f"[NETWORK] Failed: {e}")
     finally:
-        # Always clean up, but report if cleanup fails
         success, error = cleanup_network_rules(interface)
         if success:
             print(f"[NETWORK] Cleaned up latency on {interface}")
         else:
             print(f"[NETWORK] Warning: Cleanup failed - {error}")
-
+        
         INJECTION_ACTIVE.labels(failure_type="network").set(0)
