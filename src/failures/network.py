@@ -65,23 +65,27 @@ def inject_network(config: dict, dry_run: bool = False):
 
     try:
         # Clean any existing rules first (idempotent operation)
-        cleanup_network_rules(interface)
+        success, error = cleanup_network_rules(interface)
+        if not success:
+            raise Exception(f"Pre-cleanup failed: {error}")
 
-        # Add the delay rule
         result = _run_cmd(add_cmd)
         if result.returncode != 0:
             raise Exception(f"Failed to add delay: {result.stderr}")
 
         INJECTIONS_TOTAL.labels(failure_type="network", status="success").inc()
 
-        # Hold the delay for the specified duration
         time.sleep(duration)
 
     except Exception as e:
         INJECTIONS_TOTAL.labels(failure_type="network", status="failed").inc()
         print(f"[NETWORK] Failed: {e}")
     finally:
-        # Always clean up, even if injection failed
-        cleanup_network_rules(interface)
+        # Always clean up, but report if cleanup fails
+        success, error = cleanup_network_rules(interface)
+        if success:
+            print(f"[NETWORK] Cleaned up latency on {interface}")
+        else:
+            print(f"[NETWORK] Warning: Cleanup failed - {error}")
+        
         INJECTION_ACTIVE.labels(failure_type="network").set(0)
-        print(f"[NETWORK] Cleaned up latency on {interface}")
