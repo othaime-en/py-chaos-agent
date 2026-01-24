@@ -1,11 +1,11 @@
 import subprocess
 import time
-from typing import Tuple
+from typing import Tuple, Optional
 import re
 from ..metrics import INJECTIONS_TOTAL, INJECTION_ACTIVE
 
 
-def validate_interface_name(interface: str) -> Tuple[bool, str]:
+def validate_interface_name(interface: str) -> Tuple[bool, Optional[str]]:
     """
     Validate that interface name is safe and follows Linux naming conventions.
 
@@ -54,7 +54,7 @@ def validate_interface_name(interface: str) -> Tuple[bool, str]:
     return True, None
 
 
-def validate_delay_ms(delay_ms: int) -> Tuple[bool, str]:
+def validate_delay_ms(delay_ms: int) -> Tuple[bool, Optional[str]]:
     """
     Validate delay value is within reasonable bounds.
 
@@ -73,7 +73,7 @@ def validate_delay_ms(delay_ms: int) -> Tuple[bool, str]:
     return True, None
 
 
-def verify_interface_exists(interface: str) -> Tuple[bool, str]:
+def verify_interface_exists(interface: str) -> Tuple[bool, Optional[str]]:
     """
     Verify that the network interface actually exists on the system.
 
