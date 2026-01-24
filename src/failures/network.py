@@ -41,7 +41,7 @@ def cleanup_network_rules(interface="eth0"):
     if "cannot find device" in stderr_lower or "no such device" in stderr_lower:
         return False, f"Interface '{interface}' does not exist"
     elif "operation not permitted" in stderr_lower:
-        return False, f"Permission denied - NET_ADMIN capability required"
+        return False, "Permission denied - NET_ADMIN capability required"
     elif "command not found" in stderr_lower or "tc: not found" in stderr_lower:
         return False, "tc command not found - install iproute2 package"
     else:
