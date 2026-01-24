@@ -11,19 +11,19 @@ def _run_cmd(cmd):
 def cleanup_network_rules(interface="eth0"):
     """
     Remove any existing tc qdisc rules on the interface.
-    
+
     Returns:
         tuple: (success: bool, error_message: str or None)
     """
     del_cmd = f"tc qdisc del dev {interface} root"
     result = _run_cmd(del_cmd)
-    
+
     if result.returncode == 0:
         return True, None
-    
+
     # Check if the error is benign (no qdisc exists)
     stderr_lower = result.stderr.lower()
-    
+
     # These are expected errors when no rules exist - not a problem
     benign_errors = [
         "no such file or directory",
@@ -31,12 +31,12 @@ def cleanup_network_rules(interface="eth0"):
         "rtnetlink answers: no such file or directory",
         "RTNETLINK answers: No such file or directory",
     ]
-    
+
     if any(err in stderr_lower for err in benign_errors):
         return True, None
-    
+
     error_msg = result.stderr.strip() or "Unknown error"
-    
+
     # Check for specific critical errors
     if "cannot find device" in stderr_lower or "no such device" in stderr_lower:
         return False, f"Interface '{interface}' does not exist"
@@ -87,5 +87,5 @@ def inject_network(config: dict, dry_run: bool = False):
             print(f"[NETWORK] Cleaned up latency on {interface}")
         else:
             print(f"[NETWORK] Warning: Cleanup failed - {error}")
-        
+
         INJECTION_ACTIVE.labels(failure_type="network").set(0)
