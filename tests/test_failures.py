@@ -79,6 +79,20 @@ class TestCPUFailures:
         captured = capsys.readouterr()
         assert "[CPU] Hogging" in captured.out
 
+    def test_inject_cpu_metrics_correct_order(self):
+        """Test that CPU injection updates metrics in correct order."""
+        config = {"duration_seconds": 1, "cores": 1}
+        
+        # Before injection
+        assert INJECTION_ACTIVE.labels(failure_type="cpu")._value.get() == 0
+        assert INJECTIONS_TOTAL.labels(failure_type="cpu", status="success")._value.get() == 0
+        
+        inject_cpu(config, dry_run=False)
+        
+        # After successful injection
+        assert INJECTION_ACTIVE.labels(failure_type="cpu")._value.get() == 0
+        assert INJECTIONS_TOTAL.labels(failure_type="cpu", status="success")._value.get() == 1
+
 
 class TestMemoryFailures:
     """Test memory failure injection."""
