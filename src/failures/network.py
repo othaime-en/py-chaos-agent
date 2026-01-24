@@ -3,6 +3,39 @@ import time
 from ..metrics import INJECTIONS_TOTAL, INJECTION_ACTIVE
 
 
+def validate_interface_name(interface: str) -> Tuple[bool, str]:
+    """
+    Validate that interface name is safe and follows Linux naming conventions.
+    
+    Linux interface names must:
+    - Be 1-15 characters long
+    - Contain only alphanumeric, dash, underscore, dot, colon
+    - Not contain shell metacharacters
+    
+    Returns:
+        tuple: (is_valid: bool, error_message: str or None)
+    """
+    if not interface:
+        return False, "Interface name cannot be empty"
+    
+    if len(interface) > 15:
+        return False, f"Interface name too long (max 15 chars): {interface}"
+    
+    # Linux interface naming pattern
+    pattern = r'^[a-zA-Z0-9._:-]+$'
+    
+    if not re.match(pattern, interface):
+        return False, f"Invalid interface name: {interface}"
+    
+    # Explicitly block shell metacharacters
+    dangerous_chars = [';', '&', '|', '$', '`', '(', ')', '<', '>', '\n', '\r', '\\', '"', "'", ' ']
+    for char in dangerous_chars:
+        if char in interface:
+            return False, f"Interface name contains forbidden character: '{char}'"
+    
+    return True, None
+
+
 def _run_cmd(cmd):
     """Execute shell command and return result."""
     return subprocess.run(cmd, shell=True, capture_output=True, text=True)
