@@ -79,6 +79,26 @@ class TestCPUFailures:
         captured = capsys.readouterr()
         assert "[CPU] Hogging" in captured.out
 
+    def test_inject_cpu_metrics_correct_order(self):
+        """Test that CPU injection updates metrics in correct order."""
+        config = {"duration_seconds": 1, "cores": 1}
+
+        # Before injection
+        assert INJECTION_ACTIVE.labels(failure_type="cpu")._value.get() == 0
+        assert (
+            INJECTIONS_TOTAL.labels(failure_type="cpu", status="success")._value.get()
+            == 0
+        )
+
+        inject_cpu(config, dry_run=False)
+
+        # After successful injection
+        assert INJECTION_ACTIVE.labels(failure_type="cpu")._value.get() == 0
+        assert (
+            INJECTIONS_TOTAL.labels(failure_type="cpu", status="success")._value.get()
+            == 1
+        )
+
 
 class TestMemoryFailures:
     """Test memory failure injection."""
@@ -342,3 +362,51 @@ class TestNetworkFailures:
         inject_network(config, dry_run=True)
         captured = capsys.readouterr()
         assert "0ms latency" in captured.out
+
+    @patch("src.failures.network._run_cmd")
+    def test_cleanup_network_rules_success(self, mock_run_cmd):
+        """Test successful cleanup returns True."""
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stderr = ""
+        mock_run_cmd.return_value = mock_result
+
+        success, error = cleanup_network_rules("eth0")
+        assert success is True
+        assert error is None
+
+    @patch("src.failures.network._run_cmd")
+    def test_cleanup_network_rules_no_rules_exist(self, mock_run_cmd):
+        """Test cleanup when no rules exist (benign error)."""
+        mock_result = MagicMock()
+        mock_result.returncode = 2
+        mock_result.stderr = "RTNETLINK answers: No such file or directory"
+        mock_run_cmd.return_value = mock_result
+
+        success, error = cleanup_network_rules("eth0")
+        assert success is True  # This is expected, not an error
+        assert error is None
+
+    @patch("src.failures.network._run_cmd")
+    def test_cleanup_network_rules_invalid_interface(self, mock_run_cmd):
+        """Test cleanup with invalid interface."""
+        mock_result = MagicMock()
+        mock_result.returncode = 1
+        mock_result.stderr = "Cannot find device 'eth999'"
+        mock_run_cmd.return_value = mock_result
+
+        success, error = cleanup_network_rules("eth999")
+        assert success is False
+        assert "does not exist" in error
+
+    @patch("src.failures.network._run_cmd")
+    def test_cleanup_network_rules_no_permissions(self, mock_run_cmd):
+        """Test cleanup without NET_ADMIN capability."""
+        mock_result = MagicMock()
+        mock_result.returncode = 1
+        mock_result.stderr = "Operation not permitted"
+        mock_run_cmd.return_value = mock_result
+
+        success, error = cleanup_network_rules("eth0")
+        assert success is False
+        assert "Permission denied" in error or "NET_ADMIN" in error
