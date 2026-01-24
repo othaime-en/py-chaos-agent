@@ -9,11 +9,43 @@ def _run_cmd(cmd):
 
 
 def cleanup_network_rules(interface="eth0"):
-    """Remove any existing tc qdisc rules on the interface."""
-    del_cmd = f"tc qdisc del dev {interface} root 2>/dev/null"
+    """
+    Remove any existing tc qdisc rules on the interface.
+    
+    Returns:
+        tuple: (success: bool, error_message: str or None)
+    """
+    del_cmd = f"tc qdisc del dev {interface} root"
     result = _run_cmd(del_cmd)
-    # Suppress error output - it's OK if no rules exist
-    return result.returncode
+    
+    if result.returncode == 0:
+        return True, None
+    
+    # Check if the error is benign (no qdisc exists)
+    stderr_lower = result.stderr.lower()
+    
+    # These are expected errors when no rules exist - not a problem
+    benign_errors = [
+        "no such file or directory",
+        "cannot delete qdisc with handle of zero",
+        "rtnetlink answers: no such file or directory",
+        "RTNETLINK answers: No such file or directory",
+    ]
+    
+    if any(err in stderr_lower for err in benign_errors):
+        return True, None
+    
+    error_msg = result.stderr.strip() or "Unknown error"
+    
+    # Check for specific critical errors
+    if "cannot find device" in stderr_lower or "no such device" in stderr_lower:
+        return False, f"Interface '{interface}' does not exist"
+    elif "operation not permitted" in stderr_lower:
+        return False, f"Permission denied - NET_ADMIN capability required"
+    elif "command not found" in stderr_lower or "tc: not found" in stderr_lower:
+        return False, "tc command not found - install iproute2 package"
+    else:
+        return False, f"Failed to cleanup: {error_msg}"
 
 
 def inject_network(config: dict, dry_run: bool = False):
