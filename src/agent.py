@@ -22,8 +22,11 @@ def cleanup_on_exit():
     """Clean up any active network rules on shutdown."""
     print("[AGENT] Performing cleanup on shutdown...")
     for interface in _configured_interfaces:
-        cleanup_network_rules(interface)
-        print(f"[AGENT] Cleaned up network rules on {interface}")
+        success, error = cleanup_network_rules(interface)
+        if success:
+            print(f"[AGENT] Cleaned up network rules on {interface}")
+        else:
+            print(f"[AGENT] Warning: Failed to cleanup {interface}: {error}")
 
 
 def signal_handler(sig, frame):
