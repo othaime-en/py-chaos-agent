@@ -82,9 +82,29 @@ def verify_interface_exists(interface: str) -> Tuple[bool, str]:
     except Exception as e:
         return False, f"Error checking interface: {e}"
 
-def _run_cmd(cmd):
-    """Execute shell command and return result."""
-    return subprocess.run(cmd, shell=True, capture_output=True, text=True)
+def _run_cmd_safe(args: list) -> subprocess.CompletedProcess:
+    """
+    Execute command safely without shell interpretation.
+    
+    Args:
+        args: Command and arguments as a list (NOT a string)
+        
+    Returns:
+        CompletedProcess object with returncode, stdout, stderr
+    """
+    try:
+        result = subprocess.run(
+            args,
+            shell=False,  #No shell interpretation
+            capture_output=True,
+            text=True,
+            timeout=30  # Prevent hanging
+        )
+        return result
+    except subprocess.TimeoutExpired:
+        raise Exception(f"Command timed out: {' '.join(args)}")
+    except Exception as e:
+        raise Exception(f"Command execution failed: {e}")
 
 
 def cleanup_network_rules(interface="eth0"):
