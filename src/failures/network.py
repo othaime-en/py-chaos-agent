@@ -1,5 +1,7 @@
 import subprocess
 import time
+from typing import Tuple
+import re
 from ..metrics import INJECTIONS_TOTAL, INJECTION_ACTIVE
 
 
@@ -35,6 +37,50 @@ def validate_interface_name(interface: str) -> Tuple[bool, str]:
     
     return True, None
 
+def validate_delay_ms(delay_ms: int) -> Tuple[bool, str]:
+    """
+    Validate delay value is within reasonable bounds.
+    
+    Returns:
+        tuple: (is_valid: bool, error_message: str or None)
+    """
+    if not isinstance(delay_ms, (int, float)):
+        return False, f"Delay must be a number, got {type(delay_ms)}"
+    
+    if delay_ms < 0:
+        return False, f"Delay cannot be negative: {delay_ms}"
+    
+    if delay_ms > 10000:  # 10 seconds max
+        return False, f"Delay too high (max 10000ms): {delay_ms}"
+    
+    return True, None
+
+
+def verify_interface_exists(interface: str) -> Tuple[bool, str]:
+    """
+    Verify that the network interface actually exists on the system.
+    
+    Returns:
+        tuple: (exists: bool, error_message: str or None)
+    """
+    try:
+        # Use ip link show with exact interface name (no shell injection possible)
+        result = subprocess.run(
+            ["ip", "link", "show", interface],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        
+        if result.returncode == 0:
+            return True, None
+        else:
+            return False, f"Interface '{interface}' does not exist"
+            
+    except subprocess.TimeoutExpired:
+        return False, f"Timeout checking interface '{interface}'"
+    except Exception as e:
+        return False, f"Error checking interface: {e}"
 
 def _run_cmd(cmd):
     """Execute shell command and return result."""
