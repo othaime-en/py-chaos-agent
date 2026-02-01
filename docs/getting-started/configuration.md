@@ -239,8 +239,8 @@ failures:
 **Examples:**
 
 ```yaml
-target_name: "nginx"        # Kill nginx processes
-target_name: "python"       # Kill Python processes
+target_name: "my_app"        # Kills my_app process
+target_name: "api_server"       # Kill API servere
 target_name: "target-app"   # Kill specific app
 ```
 
@@ -263,6 +263,20 @@ target_name: "target-app"   # Kill specific app
 2. Wait up to 3 seconds for termination
 3. If still running, send SIGKILL (forced termination)
 4. Wait up to 2 seconds for confirmation
+
+### Security Considerations
+
+**Target Name Safety:**
+- ✅ Use specific application names: `"myapp"`, `"api-server"`, `"worker-service"`
+- ❌ Avoid generic names: `"python"`, `"java"`, `"node"` (will be rejected)
+- Minimum 3 characters required for safety
+
+**Protected Processes:**
+The chaos agent will never kill:
+- System critical processes (systemd, init)
+- Container infrastructure (dockerd, containerd, kubelet)
+- Network services (sshd, NetworkManager)
+- The chaos agent itself and its children
 
 ### Example Scenarios
 
