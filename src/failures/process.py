@@ -56,56 +56,56 @@ PROHIBITED_TARGETS = {
 def validate_target_name(target_name: str) -> tuple[bool, str]:
     """
     Validate that target_name is safe and specific enough.
-    
+
     Returns:
         tuple: (is_valid: bool, error_message: str)
     """
     if not target_name or not target_name.strip():
         return False, "Target name cannot be empty"
-    
+
     target_lower = target_name.lower().strip()
-    
+
     # Check against prohibited list
     if target_lower in PROHIBITED_TARGETS:
         return False, (
             f"Target name '{target_name}' is too broad and could kill critical processes. "
             f"Use a more specific application name (e.g., 'myapp' instead of 'python')"
         )
-    
+
     # Require minimum length for specificity
     if len(target_lower) < 3:
         return False, (
             f"Target name '{target_name}' is too short (min 3 chars). "
             f"Use a specific application name to avoid accidental kills"
         )
-    
+
     return True, ""
 
 
 def is_critical_process(proc_name: str, cmdline: list) -> bool:
     """
     Check if a process is critical to system operation.
-    
+
     Args:
         proc_name: Process name
         cmdline: Process command line arguments
-        
+
     Returns:
         bool: True if process is critical and should never be killed
     """
     proc_name_lower = proc_name.lower() if proc_name else ""
-    
+
     # Check against critical process list
     if proc_name_lower in CRITICAL_PROCESSES:
         return True
-    
+
     # Check command line for critical indicators
     if cmdline:
         cmdline_str = " ".join(cmdline).lower()
         for critical in CRITICAL_PROCESSES:
             if critical in cmdline_str:
                 return True
-    
+
     return False
 
 
@@ -143,7 +143,7 @@ def get_safe_target_processes(target_name):
 
                 proc_name = proc.info["name"] or ""
                 cmdline = proc.info["cmdline"] or []
-                
+
                 # CRITICAL: Check if this is a system-critical process
                 if is_critical_process(proc_name, cmdline):
                     print(

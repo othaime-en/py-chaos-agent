@@ -78,7 +78,7 @@ class TestCriticalProcessDetection:
         """Verify all entries in CRITICAL_PROCESSES are lowercase."""
         for process in CRITICAL_PROCESSES:
             assert process == process.lower(), f"'{process}' should be lowercase"
-    
+
     def test_prohibited_targets_are_lowercase(self):
         """Verify all entries in PROHIBITED_TARGETS are lowercase."""
         for target in PROHIBITED_TARGETS:
@@ -133,7 +133,9 @@ class TestProcessInjectionWithValidation:
         assert "Invalid target name" in captured.out
         assert "too broad" in captured.out
         assert (
-            INJECTIONS_TOTAL.labels(failure_type="process", status="failed")._value.get()
+            INJECTIONS_TOTAL.labels(
+                failure_type="process", status="failed"
+            )._value.get()
             == 1
         )
 
@@ -206,26 +208,26 @@ class TestCriticalProcessProtection:
             return mock_procs
 
         monkeypatch.setattr(psutil, "process_iter", mock_process_iter)
-        
+
         # Also mock os.getpid to avoid self-protection logic
         monkeypatch.setattr("os.getpid", lambda: 9999)
         monkeypatch.setattr("os.getppid", lambda: 9998)
-        
+
         # Mock Process class for children lookup
         class MockProcess:
             def children(self, recursive=False):
                 return []
-        
+
         monkeypatch.setattr(psutil, "Process", lambda pid: MockProcess())
 
         # Search for a broad term that would match multiple processes
         result = get_safe_target_processes("target")
 
         captured = capsys.readouterr()
-        
+
         # Should have logged that it skipped critical processes
         assert "Skipping critical system process" in captured.out
-        
+
         # Should only return non-critical process
         assert len(result) == 1
         assert result[0].info["name"] == "target-app"
@@ -237,11 +239,11 @@ class TestRealWorldScenarios:
     def test_scenario_kubernetes_pod(self):
         """Test that Kubernetes infrastructure is protected."""
         critical_k8s = ["kubelet", "kube-proxy", "pause"]
-        
+
         for process in critical_k8s:
             # These should be detected as critical processes
             assert is_critical_process(process, []) is True
-            
+
         # Additionally, some k8s processes are also in prohibited targets
         # (but not all - we check separately)
         prohibited_k8s = ["kubelet"]  # This one is in both lists
@@ -252,7 +254,7 @@ class TestRealWorldScenarios:
     def test_scenario_docker_environment(self):
         """Test that Docker infrastructure is protected."""
         critical_docker = ["dockerd", "containerd", "containerd-shim"]
-        
+
         for process in critical_docker:
             assert is_critical_process(process, []) is True
 
@@ -271,7 +273,7 @@ class TestRealWorldScenarios:
             "target-app",
             "myservice",
         ]
-        
+
         for app in valid_apps:
             is_valid, error = validate_target_name(app)
             assert is_valid is True, f"{app} should be valid but got: {error}"
@@ -283,7 +285,7 @@ class TestEdgeCases:
     def test_three_char_minimum_boundary(self):
         """Test the 3-character minimum boundary."""
         assert validate_target_name("ab")[0] is False  # Too short
-        assert validate_target_name("abc")[0] is True   # Exactly 3 - OK
+        assert validate_target_name("abc")[0] is True  # Exactly 3 - OK
         assert validate_target_name("abcd")[0] is True  # More than 3 - OK
 
     def test_process_name_with_numbers(self):
@@ -305,7 +307,7 @@ class TestEdgeCases:
             ("KubeLet", False),
             ("PYTHON", False),
         ]
-        
+
         for name, expected_valid in variations:
             is_valid, _ = validate_target_name(name)
             assert is_valid == expected_valid
@@ -314,11 +316,11 @@ class TestEdgeCases:
         """Test that partial matches of prohibited names are allowed."""
         # These contain prohibited strings but are more specific
         allowed = [
-            "mypython-app",    # Contains 'python' but more specific
-            "nodejs-server",   # Contains 'node' but more specific  
-            "my-java-app",     # Contains 'java' but more specific
+            "mypython-app",  # Contains 'python' but more specific
+            "nodejs-server",  # Contains 'node' but more specific
+            "my-java-app",  # Contains 'java' but more specific
         ]
-        
+
         for name in allowed:
             is_valid, error = validate_target_name(name)
             # These should be rejected because our check is for exact match
