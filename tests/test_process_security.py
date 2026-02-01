@@ -1,6 +1,5 @@
 """Additional tests for enhanced process killer security."""
 
-import pytest
 from unittest.mock import MagicMock
 from src.failures.process import (
     validate_target_name,
