@@ -171,7 +171,7 @@ class TestProcessFailures:
 
     def test_inject_process_dry_run(self, capsys):
         """Test process kill in dry run mode."""
-        config = {"target_name": "python"}
+        config = {"target_name": "my_app"}
         inject_process(config, dry_run=True)
         captured = capsys.readouterr()
         # Should either find process or report none found
