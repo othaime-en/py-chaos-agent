@@ -24,7 +24,7 @@ CRITICAL_PROCESSES = {
     # Network & SSH
     "sshd",
     "networkd",
-    "NetworkManager",
+    "networkmanager",
     # System critical
     "dbus-daemon",
     "rsyslogd",
