@@ -2,6 +2,112 @@ import os
 import psutil
 from ..metrics import INJECTIONS_TOTAL
 
+# Critical system processes that should NEVER be killed
+CRITICAL_PROCESSES = {
+    # Init systems
+    "systemd",
+    "init",
+    "launchd",
+    # Container runtimes
+    "dockerd",
+    "containerd",
+    "containerd-shim",
+    "runc",
+    "crio",
+    "podman",
+    # Kubernetes
+    "kubelet",
+    "kube-proxy",
+    "kube-apiserver",
+    "kube-controller",
+    "kube-scheduler",
+    # Network & SSH
+    "sshd",
+    "networkd",
+    "networkmanager",
+    # System critical
+    "dbus-daemon",
+    "rsyslogd",
+    "journald",
+    "udevd",
+    # Container pause/infra
+    "pause",
+}
+
+# Overly broad target names that are too generic to safely use
+PROHIBITED_TARGETS = {
+    "python",
+    "python3",
+    "java",
+    "node",
+    "sh",
+    "bash",
+    "zsh",
+    "ksh",
+    "systemd",
+    "init",
+    "root",
+    "kubelet",
+    "dockerd",
+    "containerd",
+}
+
+
+def validate_target_name(target_name: str) -> tuple[bool, str]:
+    """
+    Validate that target_name is safe and specific enough.
+
+    Returns:
+        tuple: (is_valid: bool, error_message: str)
+    """
+    if not target_name or not target_name.strip():
+        return False, "Target name cannot be empty"
+
+    target_lower = target_name.lower().strip()
+
+    # Check against prohibited list
+    if target_lower in PROHIBITED_TARGETS:
+        return False, (
+            f"Target name '{target_name}' is too broad and could kill critical processes. "
+            f"Use a more specific application name (e.g., 'myapp' instead of 'python')"
+        )
+
+    # Require minimum length for specificity
+    if len(target_lower) < 3:
+        return False, (
+            f"Target name '{target_name}' is too short (min 3 chars). "
+            f"Use a specific application name to avoid accidental kills"
+        )
+
+    return True, ""
+
+
+def is_critical_process(proc_name: str, cmdline: list) -> bool:
+    """
+    Check if a process is critical to system operation.
+
+    Args:
+        proc_name: Process name
+        cmdline: Process command line arguments
+
+    Returns:
+        bool: True if process is critical and should never be killed
+    """
+    proc_name_lower = proc_name.lower() if proc_name else ""
+
+    # Check against critical process list
+    if proc_name_lower in CRITICAL_PROCESSES:
+        return True
+
+    # Check command line for critical indicators
+    if cmdline:
+        cmdline_str = " ".join(cmdline).lower()
+        for critical in CRITICAL_PROCESSES:
+            if critical in cmdline_str:
+                return True
+
+    return False
+
 
 def get_safe_target_processes(target_name):
     """
@@ -35,14 +141,23 @@ def get_safe_target_processes(target_name):
                 if proc.info["ppid"] == my_pid:
                     continue
 
-                # Match by process name
                 proc_name = proc.info["name"] or ""
+                cmdline = proc.info["cmdline"] or []
+
+                # CRITICAL: Check if this is a system-critical process
+                if is_critical_process(proc_name, cmdline):
+                    print(
+                        f"[PROCESS] Skipping critical system process: "
+                        f"{proc_name} (PID: {proc.info['pid']})"
+                    )
+                    continue
+
+                # Match by process name
                 if target_name.lower() in proc_name.lower():
                     safe_targets.append(proc)
                     continue
 
                 # Also try matching by command line for better targeting
-                cmdline = proc.info["cmdline"]
                 if cmdline:
                     cmdline_str = " ".join(cmdline).lower()
                     if target_name.lower() in cmdline_str:
@@ -64,6 +179,13 @@ def inject_process(config: dict, dry_run: bool = False):
     target_name = config.get("target_name")
     if not target_name:
         print("[PROCESS] No target_name specified in config")
+        return
+
+    # VALIDATION: Check if target name is safe
+    is_valid, error_msg = validate_target_name(target_name)
+    if not is_valid:
+        print(f"[PROCESS] Invalid target name: {error_msg}")
+        INJECTIONS_TOTAL.labels(failure_type="process", status="failed").inc()
         return
 
     # Find safe target processes
