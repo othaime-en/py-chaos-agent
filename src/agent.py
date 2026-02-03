@@ -4,6 +4,7 @@ import importlib
 import signal
 import sys
 import uuid
+import logging
 from .config import load_config
 from .metrics import start_metrics_server
 from .failures.network import cleanup_network_rules
@@ -15,7 +16,7 @@ from .logging_config import (
 )
 
 # Logger will be initialized after config is loaded
-logger = None
+logger: logging.Logger
 
 FAILURE_MODULES = {
     "cpu": ".failures.cpu",

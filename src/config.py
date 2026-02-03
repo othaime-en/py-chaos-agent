@@ -6,6 +6,7 @@ Loads configuration from config.yaml and provides typed access to settings.
 
 import yaml
 from pathlib import Path
+from typing import Any, Dict
 
 
 class AgentConfig:
@@ -32,9 +33,11 @@ class Config:
         self.agent = AgentConfig(config_dict.get("agent", {}))
         self.failures = config_dict.get("failures", {})
 
-    def get_logging_config(self) -> dict:
+    def get_logging_config(self) -> Dict[str, Any]:
         """Get logging configuration from config."""
-        return self.raw_config.get("logging", {})
+        logging_config = self.raw_config.get("logging", {})
+        # Ensure we return a dict, not Any
+        return logging_config if isinstance(logging_config, dict) else {}
 
 
 def load_config(config_path: str = "config.yaml") -> Config:

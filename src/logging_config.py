@@ -56,7 +56,7 @@ class StructuredFormatter(logging.Formatter):
 
     def _format_json(self, record: logging.LogRecord) -> str:
         """Format as JSON for machine parsing."""
-        log_data = {
+        log_data: Dict[str, Any] = {
             "timestamp": datetime.utcnow().isoformat() + "Z",
             "level": record.levelname,
             "logger": record.name,
@@ -226,7 +226,7 @@ def setup_logging(config: Optional[Dict[str, Any]] = None) -> None:
     """
 
     # Default configuration
-    defaults = {
+    defaults: Dict[str, Any] = {
         "level": "INFO",
         "format": "text",
         "console": {"enabled": True},
@@ -243,10 +243,10 @@ def setup_logging(config: Optional[Dict[str, Any]] = None) -> None:
         config = {}
 
     # Helper to get config value with fallback to default
-    def get_config(key_path, default_value):
+    def get_config(key_path: str, default_value: Any) -> Any:
         """Get nested config value with dot notation (e.g., 'file.path')"""
         keys = key_path.split(".")
-        value = config
+        value: Any = config
         for key in keys:
             if isinstance(value, dict) and key in value:
                 value = value[key]
@@ -269,14 +269,22 @@ def setup_logging(config: Optional[Dict[str, Any]] = None) -> None:
     if console_enabled_env is not None:
         console_enabled = console_enabled_env.lower() in ("true", "1", "yes")
     else:
-        console_enabled = get_config("console.enabled", defaults["console"]["enabled"])
+        console_dict = get_config("console", defaults["console"])
+        console_enabled = (
+            console_dict.get("enabled", True)
+            if isinstance(console_dict, dict)
+            else True
+        )
 
     # File logging
     file_enabled_env = os.environ.get("ENABLE_FILE_LOGGING")
     if file_enabled_env is not None:
         file_enabled = file_enabled_env.lower() in ("true", "1", "yes")
     else:
-        file_enabled = get_config("file.enabled", defaults["file"]["enabled"])
+        file_dict = get_config("file", defaults["file"])
+        file_enabled = (
+            file_dict.get("enabled", True) if isinstance(file_dict, dict) else True
+        )
 
     log_file = os.environ.get("LOG_FILE") or get_config(
         "file.path", defaults["file"]["path"]
