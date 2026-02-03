@@ -54,7 +54,7 @@ spec:
       labels:
         app: resilient-app
     spec:
-      shareProcessNamespace: true # CRITICAL: allows sidecar to see/kill app processes
+      shareProcessNamespace: true
       containers:
         - name: target-app
           image: target-app:latest
@@ -69,13 +69,28 @@ spec:
             - name: config
               mountPath: /app/config.yaml
               subPath: config.yaml
+            - name: logs
+              mountPath: /var/log/chaos-agent
           securityContext:
             capabilities:
               add: ["NET_ADMIN"] # Required for tc
           ports:
             - containerPort: 8000 # metrics
+          env:
+            - name: LOG_LEVEL
+              value: INFO
+            - name: JSON_LOGS
+              value: "true"
+            - name: LOG_FILE
+              value: "/var/log/chaos-agent/agent.log"
+            - name: HOSTNAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
 
       volumes:
         - name: config
           configMap:
             name: chaos-config
+        - name: logs
+          emptyDir: {}
