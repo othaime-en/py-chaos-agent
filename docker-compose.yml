@@ -16,5 +16,10 @@ services:
     pid: "service:target-app"
     volumes:
       - ./config.yaml:/app/config.yaml:ro
+      - ./logs:/var/log/chaos-agent
     ports:
       - "8000:8000"
+    environment:
+      - LOG_LEVEL=INFO
+      - JSON_LOGS=true
+      - LOG_FILE=/var/log/chaos-agent/agent.log
