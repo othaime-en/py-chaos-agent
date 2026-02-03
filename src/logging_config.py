@@ -4,7 +4,7 @@ Logging configuration for Py-Chaos-Agent.
 This module provides centralized logging configuration with:
 - Structured logging with context
 - Multiple output handlers (console, file, JSON)
-- Log level management via environment variables
+- Log level management via config.yaml (with env var overrides)
 - Correlation IDs for request tracking
 - Performance metrics logging
 - Security-aware logging (no sensitive data)
@@ -152,62 +152,110 @@ def clear_correlation_id():
         delattr(_thread_local, 'correlation_id')
 
 
-def setup_logging(
-    log_level: Optional[str] = None,
-    log_file: Optional[str] = None,
-    json_logs: bool = False,
-    enable_file_logging: bool = True,
-    max_file_size_mb: int = 10,
-    backup_count: int = 5,
-) -> None:
+def setup_logging(config: Optional[Dict[str, Any]] = None) -> None:
     """
     Configure application-wide logging.
     
-    Args:
-        log_level: Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL).
-                  If None, reads from LOG_LEVEL environment variable (default: INFO)
-        log_file: Path to log file. If None, reads from LOG_FILE env var
-                 (default: /var/log/chaos-agent/agent.log or ./logs/agent.log)
-        json_logs: If True, output logs in JSON format. Reads from JSON_LOGS env var
-        enable_file_logging: If True, log to file in addition to console
-        max_file_size_mb: Maximum size of each log file before rotation
-        backup_count: Number of backup files to keep
+    Configuration priority (highest to lowest):
+    1. Environment variables (for runtime overrides)
+    2. config parameter (from config.yaml)
+    3. Default values
     
-    Environment Variables:
-        LOG_LEVEL: Set logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
-        LOG_FILE: Path to log file
-        JSON_LOGS: Set to 'true' or '1' to enable JSON logging
-        ENABLE_FILE_LOGGING: Set to 'false' or '0' to disable file logging
+    Args:
+        config: Logging configuration dict from config.yaml with keys:
+            - level: Log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+            - format: 'json' or 'text' (human-readable)
+            - console:
+                enabled: bool (default: true)
+            - file:
+                enabled: bool (default: true)
+                path: str (default: ./logs/agent.log)
+                max_size_mb: int (default: 10)
+                backup_count: int (default: 5)
+    
+    Environment Variables (overrides):
+        LOG_LEVEL: Override log level
+        LOG_FORMAT: Override format ('json' or 'text')
+        LOG_FILE: Override log file path
+        ENABLE_FILE_LOGGING: Override file logging (true/false)
+        ENABLE_CONSOLE_LOGGING: Override console logging (true/false)
+    
+    Example config.yaml:
+        logging:
+          level: INFO
+          format: text  # or 'json'
+          console:
+            enabled: true
+          file:
+            enabled: true
+            path: /var/log/chaos-agent/agent.log
+            max_size_mb: 10
+            backup_count: 5
     """
     
-    # Determine log level
-    if log_level is None:
-        log_level = os.environ.get('LOG_LEVEL', 'INFO').upper()
+    # Default configuration
+    defaults = {
+        'level': 'INFO',
+        'format': 'text',
+        'console': {
+            'enabled': True
+        },
+        'file': {
+            'enabled': True,
+            'path': './logs/agent.log',
+            'max_size_mb': 10,
+            'backup_count': 5
+        }
+    }
     
-    numeric_level = getattr(logging, log_level, logging.INFO)
+    # Merge with provided config
+    if config is None:
+        config = {}
     
-    # Determine log file path
-    if log_file is None:
-        log_file = os.environ.get('LOG_FILE')
-        if log_file is None:
-            # Try /var/log first, fall back to local logs directory
-            if os.access('/var/log', os.W_OK):
-                log_dir = '/var/log/chaos-agent'
+    # Helper to get config value with fallback to default
+    def get_config(key_path, default_value):
+        """Get nested config value with dot notation (e.g., 'file.path')"""
+        keys = key_path.split('.')
+        value = config
+        for key in keys:
+            if isinstance(value, dict) and key in value:
+                value = value[key]
             else:
-                log_dir = './logs'
-            
-            os.makedirs(log_dir, exist_ok=True)
-            log_file = os.path.join(log_dir, 'agent.log')
+                return default_value
+        return value
     
-    # Determine JSON format
-    if not json_logs:
-        json_env = os.environ.get('JSON_LOGS', '').lower()
-        json_logs = json_env in ('true', '1', 'yes')
+    # Get configuration values with priority: env vars > config > defaults
+    log_level = os.environ.get('LOG_LEVEL') or get_config('level', defaults['level'])
+    log_level = log_level.upper()
     
-    # Determine if file logging is enabled
-    if enable_file_logging:
-        file_logging_env = os.environ.get('ENABLE_FILE_LOGGING', 'true').lower()
-        enable_file_logging = file_logging_env not in ('false', '0', 'no')
+    log_format = os.environ.get('LOG_FORMAT') or get_config('format', defaults['format'])
+    log_format = log_format.lower()
+    json_logs = log_format == 'json'
+    
+    # Console logging
+    console_enabled_env = os.environ.get('ENABLE_CONSOLE_LOGGING')
+    if console_enabled_env is not None:
+        console_enabled = console_enabled_env.lower() in ('true', '1', 'yes')
+    else:
+        console_enabled = get_config('console.enabled', defaults['console']['enabled'])
+    
+    # File logging
+    file_enabled_env = os.environ.get('ENABLE_FILE_LOGGING')
+    if file_enabled_env is not None:
+        file_enabled = file_enabled_env.lower() in ('true', '1', 'yes')
+    else:
+        file_enabled = get_config('file.enabled', defaults['file']['enabled'])
+    
+    log_file = os.environ.get('LOG_FILE') or get_config('file.path', defaults['file']['path'])
+    max_size_mb = get_config('file.max_size_mb', defaults['file']['max_size_mb'])
+    backup_count = get_config('file.backup_count', defaults['file']['backup_count'])
+    
+    # Validate log level
+    numeric_level = getattr(logging, log_level, None)
+    if not isinstance(numeric_level, int):
+        print(f"Warning: Invalid log level '{log_level}', using INFO", file=sys.stderr)
+        numeric_level = logging.INFO
+        log_level = 'INFO'
     
     # Get root logger
     root_logger = logging.getLogger()
@@ -220,22 +268,25 @@ def setup_logging(
     console_formatter = StructuredFormatter(json_format=json_logs)
     file_formatter = StructuredFormatter(json_format=True)  # Always JSON for files
     
-    # Console handler (stdout for INFO and below, stderr for WARNING and above)
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(numeric_level)
-    console_handler.setFormatter(console_formatter)
-    console_handler.addFilter(SensitiveDataFilter())
-    root_logger.addHandler(console_handler)
+    # Console handler
+    if console_enabled:
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setLevel(numeric_level)
+        console_handler.setFormatter(console_formatter)
+        console_handler.addFilter(SensitiveDataFilter())
+        root_logger.addHandler(console_handler)
     
     # File handler with rotation
-    if enable_file_logging:
+    if file_enabled:
         try:
             # Ensure directory exists
-            os.makedirs(os.path.dirname(log_file), exist_ok=True)
+            log_dir = os.path.dirname(log_file)
+            if log_dir:  # Only create if there's a directory component
+                os.makedirs(log_dir, exist_ok=True)
             
             file_handler = logging.handlers.RotatingFileHandler(
                 log_file,
-                maxBytes=max_file_size_mb * 1024 * 1024,  # Convert MB to bytes
+                maxBytes=max_size_mb * 1024 * 1024,  # Convert MB to bytes
                 backupCount=backup_count,
                 encoding='utf-8',
             )
@@ -249,7 +300,7 @@ def setup_logging(
                 'File logging enabled',
                 extra={
                     'log_file': log_file,
-                    'max_size_mb': max_file_size_mb,
+                    'max_size_mb': max_size_mb,
                     'backup_count': backup_count,
                 }
             )
@@ -264,8 +315,10 @@ def setup_logging(
         'Logging configured',
         extra={
             'log_level': log_level,
-            'json_format': json_logs,
-            'file_logging': enable_file_logging,
+            'log_format': log_format,
+            'console_enabled': console_enabled,
+            'file_enabled': file_enabled,
+            'config_source': 'config.yaml' if config else 'defaults'
         }
     )
     
