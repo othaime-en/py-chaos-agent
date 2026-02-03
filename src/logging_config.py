@@ -1,3 +1,15 @@
+"""
+Logging configuration for Py-Chaos-Agent.
+
+This module provides centralized logging configuration with:
+- Structured logging with context
+- Multiple output handlers (console, file, JSON)
+- Log level management via environment variables
+- Correlation IDs for request tracking
+- Performance metrics logging
+- Security-aware logging (no sensitive data)
+"""
+
 import logging
 import logging.handlers
 import json
@@ -278,3 +290,57 @@ def get_logger(name: str) -> logging.Logger:
         logger.error('Something went wrong', exc_info=True)
     """
     return logging.getLogger(name)
+
+
+# Convenience logging functions with context
+def log_failure_injection(
+    logger: logging.Logger,
+    failure_type: str,
+    action: str,
+    status: str,
+    **kwargs
+):
+    """
+    Log a failure injection event with structured context.
+    
+    Args:
+        logger: Logger instance
+        failure_type: Type of failure (cpu, memory, process, network)
+        action: Action being performed (start, complete, failed)
+        status: Status of the action
+        **kwargs: Additional context to include in log
+    """
+    logger.info(
+        f'Failure injection {action}',
+        extra={
+            'failure_type': failure_type,
+            'action': action,
+            'status': status,
+            **kwargs
+        }
+    )
+
+
+def log_metric_event(
+    logger: logging.Logger,
+    metric_name: str,
+    metric_value: Any,
+    **kwargs
+):
+    """
+    Log a metric event.
+    
+    Args:
+        logger: Logger instance
+        metric_name: Name of the metric
+        metric_value: Value of the metric
+        **kwargs: Additional context
+    """
+    logger.debug(
+        f'Metric recorded: {metric_name}',
+        extra={
+            'metric_name': metric_name,
+            'metric_value': metric_value,
+            **kwargs
+        }
+    )
