@@ -28,7 +28,9 @@ class TestIntegration:
                 inject_process(config, dry_run=True)
 
         # Count dry run messages
-        dry_run_count = sum(1 for record in caplog.records if "DRY RUN" in record.message)
+        dry_run_count = sum(
+            1 for record in caplog.records if "DRY RUN" in record.message
+        )
         assert dry_run_count >= 2
 
     def test_config_and_injection_integration(self, tmp_path, caplog):
@@ -104,7 +106,7 @@ failures:
     def test_sequential_injections(self, caplog):
         """Test running injections sequentially."""
         caplog.set_level(logging.INFO)
-        
+
         # Run CPU injection
         cpu_config = {"duration_seconds": 1, "cores": 1}
         inject_cpu(cpu_config, dry_run=True)
@@ -113,9 +115,9 @@ failures:
         mem_config = {"duration_seconds": 1, "mb": 50}
         inject_memory(mem_config, dry_run=True)
 
-        # Check that both injections were logged
-        log_messages = " ".join([record.message for record in caplog.records])
         # Should have references to both CPU and memory
         has_cpu = any("cpu" in record.message.lower() for record in caplog.records)
-        has_memory = any("memory" in record.message.lower() for record in caplog.records)
+        has_memory = any(
+            "memory" in record.message.lower() for record in caplog.records
+        )
         assert has_cpu and has_memory

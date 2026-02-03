@@ -25,9 +25,7 @@ def setup_logging():
     """Setup basic logging for all tests."""
     # Configure root logger to output to console for test capture
     logging.basicConfig(
-        level=logging.DEBUG,
-        format='%(levelname)s - %(message)s',
-        force=True
+        level=logging.DEBUG, format="%(levelname)s - %(message)s", force=True
     )
     yield
     # Clean up handlers after test

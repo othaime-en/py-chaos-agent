@@ -25,7 +25,7 @@ class TestCPUFailures:
             "cores": cores,
         }
         inject_cpu(config, dry_run=True)
-        
+
         # Check for dry run message in logs
         assert any("DRY RUN" in record.message for record in caplog.records)
         # Check cores value in structured logging extra data
@@ -61,7 +61,7 @@ class TestCPUFailures:
         caplog.set_level(logging.INFO)
         config = {"duration_seconds": 1}
         inject_cpu(config, dry_run=True)
-        
+
         # Should use default of 1 core
         assert any("DRY RUN" in record.message for record in caplog.records)
 
@@ -86,7 +86,7 @@ class TestCPUFailures:
         caplog.set_level(logging.INFO)
         config = {"duration_seconds": 0, "cores": 1}
         inject_cpu(config, dry_run=False)
-        
+
         # Should complete immediately without error
         assert any("CPU stress" in record.message for record in caplog.records)
 
@@ -119,7 +119,7 @@ class TestMemoryFailures:
         caplog.set_level(logging.INFO)
         config = {"duration_seconds": 1, "mb": 50}
         inject_memory(config, dry_run=True)
-        
+
         # Check for dry run message
         assert any("DRY RUN" in record.message for record in caplog.records)
         assert any("Memory injection" in record.message for record in caplog.records)
@@ -136,7 +136,7 @@ class TestMemoryFailures:
         caplog.set_level(logging.INFO)
         config = {"duration_seconds": 1, "mb": mb}
         inject_memory(config, dry_run=True)
-        
+
         # Check that memory injection was logged
         assert any("Memory injection" in record.message for record in caplog.records)
         assert any("DRY RUN" in record.message for record in caplog.records)
@@ -150,7 +150,7 @@ class TestMemoryFailures:
 
         # Check for memory injection messages
         assert any("memory" in record.message.lower() for record in caplog.records)
-        
+
         # Check that it eventually completes
         assert (
             INJECTIONS_TOTAL.labels(
@@ -164,7 +164,7 @@ class TestMemoryFailures:
         caplog.set_level(logging.INFO)
         config = {"duration_seconds": 1}
         inject_memory(config, dry_run=True)
-        
+
         # Just check that memory injection occurred with dry run
         assert any("Memory injection" in record.message for record in caplog.records)
         assert any("DRY RUN" in record.message for record in caplog.records)
@@ -185,7 +185,7 @@ class TestMemoryFailures:
         caplog.set_level(logging.INFO)
         config = {"duration_seconds": 1, "mb": 0}
         inject_memory(config, dry_run=True)
-        
+
         # Check that memory injection occurred
         assert any("Memory injection" in record.message for record in caplog.records)
         assert any("DRY RUN" in record.message for record in caplog.records)
@@ -199,7 +199,7 @@ class TestProcessFailures:
         caplog.set_level(logging.INFO)
         config = {"target_name": "my_app"}
         inject_process(config, dry_run=True)
-        
+
         # Should either find process or report none found
         log_messages = " ".join([record.message for record in caplog.records])
         assert "DRY RUN" in log_messages or "No killable process" in log_messages
@@ -209,7 +209,7 @@ class TestProcessFailures:
         caplog.set_level(logging.WARNING)
         config = {}
         inject_process(config, dry_run=False)
-        
+
         # Should log warning about missing target name
         assert any("target_name" in record.message.lower() for record in caplog.records)
 
@@ -218,7 +218,7 @@ class TestProcessFailures:
         caplog.set_level(logging.INFO)
         config = {"target_name": "definitely_not_a_real_process_name_xyz123"}
         inject_process(config, dry_run=False)
-        
+
         # Should report no process found
         assert any("No killable process" in record.message for record in caplog.records)
         assert (
@@ -261,7 +261,7 @@ class TestProcessFailures:
         caplog.set_level(logging.WARNING)  # The warning is at WARNING level
         config = {"target_name": ""}
         inject_process(config, dry_run=False)
-        
+
         # Empty string should trigger warning about missing target_name
         log_messages = " ".join([record.message for record in caplog.records])
         assert "target_name" in log_messages.lower()
@@ -276,7 +276,7 @@ class TestNetworkFailures:
         caplog.set_level(logging.INFO)
         config = {"interface": "eth0", "delay_ms": 100, "duration_seconds": 1}
         inject_network(config, dry_run=True)
-        
+
         # Check for dry run message
         assert any("DRY RUN" in record.message for record in caplog.records)
         assert any("Network" in record.message for record in caplog.records)
@@ -304,8 +304,10 @@ class TestNetworkFailures:
 
         # Check for network injection messages
         assert any("network" in record.message.lower() for record in caplog.records)
-        assert any("200" in record.message or "latency" in record.message.lower() 
-                   for record in caplog.records)
+        assert any(
+            "200" in record.message or "latency" in record.message.lower()
+            for record in caplog.records
+        )
         assert (
             INJECTIONS_TOTAL.labels(
                 failure_type="network", status="success"
@@ -346,7 +348,7 @@ class TestNetworkFailures:
         config = {"delay_ms": 150, "duration_seconds": 1}
 
         inject_network(config, dry_run=True)
-        
+
         # Just check that network injection occurred in dry run
         assert any("Network" in record.message for record in caplog.records)
         assert any("DRY RUN" in record.message for record in caplog.records)
@@ -405,7 +407,7 @@ class TestNetworkFailures:
 
         config = {"delay_ms": 0, "duration_seconds": 1}
         inject_network(config, dry_run=True)
-        
+
         # Check that network injection occurred
         assert any("Network" in record.message for record in caplog.records)
         assert any("DRY RUN" in record.message for record in caplog.records)
@@ -527,5 +529,7 @@ class TestNetworkFailures:
         mock_cmd.assert_not_called()
 
         # Should log validation failure
-        assert any("failed" in record.message.lower() or "invalid" in record.message.lower() 
-                   for record in caplog.records)
+        assert any(
+            "failed" in record.message.lower() or "invalid" in record.message.lower()
+            for record in caplog.records
+        )
