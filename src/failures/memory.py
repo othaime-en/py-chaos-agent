@@ -1,6 +1,9 @@
 import time
 import threading
 from ..metrics import INJECTIONS_TOTAL, INJECTION_ACTIVE
+from ..logging_config import get_logger
+
+logger = get_logger(__name__)
 
 
 def _hold_memory(mb, duration):
@@ -9,8 +12,14 @@ def _hold_memory(mb, duration):
     Runs in a separate thread to avoid blocking.
     """
     data = []
+    allocation_start = time.time()
+    
     try:
-        print(f"[MEMORY] Allocating {mb} MB...")
+        logger.info(
+            'Beginning memory allocation',
+            extra={'target_mb': mb, 'duration_seconds': duration}
+        )
+        
         # Allocate memory - create unique byte arrays to ensure actual allocation
         for i in range(mb):
             # Create a new bytearray for each MB to ensure actual memory usage
@@ -19,20 +28,67 @@ def _hold_memory(mb, duration):
             for j in range(0, len(chunk), 4096):
                 chunk[j] = i % 256
             data.append(chunk)
+            
+            # Log progress for large allocations
+            if (i + 1) % 100 == 0:
+                logger.debug(
+                    'Memory allocation progress',
+                    extra={'allocated_mb': i + 1, 'target_mb': mb}
+                )
 
-        print(f"[MEMORY] Allocated {mb} MB, holding for {duration}s...")
+        allocation_time = time.time() - allocation_start
+        logger.info(
+            'Memory allocated successfully',
+            extra={
+                'allocated_mb': mb,
+                'allocation_time_seconds': round(allocation_time, 2),
+                'chunks_created': len(data)
+            }
+        )
+        
+        logger.debug(f'Holding {mb} MB for {duration} seconds')
         time.sleep(duration)
-        print(f"[MEMORY] Releasing {mb} MB...")
+        
+        logger.info(
+            'Releasing allocated memory',
+            extra={'mb': mb}
+        )
 
     except MemoryError as e:
-        print(f"[MEMORY] MemoryError: Could not allocate {mb} MB - {e}")
+        logger.error(
+            'Memory allocation failed - insufficient memory',
+            exc_info=True,
+            extra={
+                'requested_mb': mb,
+                'allocated_mb': len(data),
+                'error': str(e),
+                'error_type': 'MemoryError'
+            }
+        )
         raise
+        
     except Exception as e:
-        print(f"[MEMORY] Unexpected error during allocation: {e}")
+        logger.error(
+            'Unexpected error during memory allocation',
+            exc_info=True,
+            extra={
+                'requested_mb': mb,
+                'allocated_mb': len(data),
+                'error': str(e),
+                'error_type': type(e).__name__
+            }
+        )
         raise
+        
     finally:
+        # Cleanup
+        data_len = len(data)
         data.clear()
         del data
+        logger.debug(
+            'Memory cleanup completed',
+            extra={'freed_chunks': data_len}
+        )
 
 
 def inject_memory(config: dict, dry_run: bool = False):
@@ -40,28 +96,92 @@ def inject_memory(config: dict, dry_run: bool = False):
     duration = config["duration_seconds"]
 
     if dry_run:
-        print(f"[DRY RUN] Would allocate {mb} MB for {duration}s")
+        logger.info(
+            'Memory injection (DRY RUN)',
+            extra={
+                'mb': mb,
+                'duration_seconds': duration,
+                'dry_run': True
+            }
+        )
         INJECTIONS_TOTAL.labels(failure_type="memory", status="skipped").inc()
         return
 
-    print(f"[MEMORY] Starting memory injection: {mb} MB for {duration}s...")
+    logger.info(
+        'Starting memory pressure injection',
+        extra={
+            'mb': mb,
+            'duration_seconds': duration,
+            'operation': 'memory_pressure'
+        }
+    )
+    
     INJECTION_ACTIVE.labels(failure_type="memory").set(1)
 
     def _injection_thread():
         """Run memory injection in a thread to avoid blocking main loop."""
+        thread_id = threading.get_ident()
+        logger.debug(
+            'Memory injection thread started',
+            extra={'thread_id': thread_id}
+        )
+        
         try:
             _hold_memory(mb, duration)
             INJECTIONS_TOTAL.labels(failure_type="memory", status="success").inc()
-        except MemoryError:
+            
+            logger.info(
+                'Memory pressure injection completed successfully',
+                extra={
+                    'mb': mb,
+                    'duration_seconds': duration,
+                    'status': 'success',
+                    'thread_id': thread_id
+                }
+            )
+            
+        except MemoryError as e:
             INJECTIONS_TOTAL.labels(failure_type="memory", status="failed").inc()
-            print(f"[MEMORY] Failed: Insufficient memory to allocate {mb} MB")
+            
+            logger.error(
+                'Memory injection failed - insufficient memory',
+                exc_info=True,
+                extra={
+                    'mb': mb,
+                    'error': str(e),
+                    'error_type': 'MemoryError',
+                    'status': 'failed',
+                    'thread_id': thread_id
+                }
+            )
+            
         except Exception as e:
             INJECTIONS_TOTAL.labels(failure_type="memory", status="failed").inc()
-            print(f"[MEMORY] Failed: {e}")
+            
+            logger.error(
+                'Memory injection failed with unexpected error',
+                exc_info=True,
+                extra={
+                    'mb': mb,
+                    'error': str(e),
+                    'error_type': type(e).__name__,
+                    'status': 'failed',
+                    'thread_id': thread_id
+                }
+            )
+            
         finally:
             INJECTION_ACTIVE.labels(failure_type="memory").set(0)
-            print("[MEMORY] Memory injection completed")
+            logger.debug(
+                'Memory injection thread completing',
+                extra={'thread_id': thread_id}
+            )
 
     # Run in daemon thread so it doesn't block other injections
-    thread = threading.Thread(target=_injection_thread, daemon=True)
+    thread = threading.Thread(target=_injection_thread, daemon=True, name='memory-injection')
     thread.start()
+    
+    logger.debug(
+        'Memory injection thread spawned',
+        extra={'thread_id': thread.ident, 'thread_name': thread.name}
+    )
