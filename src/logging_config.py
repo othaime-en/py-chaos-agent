@@ -5,13 +5,18 @@ import os
 import sys
 from datetime import datetime
 from typing import Any, Dict, Optional
+import threading
+
+# Thread-local storage for correlation IDs
+_thread_local = threading.local()
+
 
 class StructuredFormatter(logging.Formatter):
     """
     Custom formatter that outputs logs in a structured format.
     
     Supports both JSON and human-readable formats depending on configuration.
-    Includes timestamps and contextual information.
+    Includes correlation IDs, timestamps, and contextual information.
     """
 
     def __init__(self, fmt=None, datefmt=None, style='%', json_format=False):
@@ -22,6 +27,11 @@ class StructuredFormatter(logging.Formatter):
 
     def format(self, record: logging.LogRecord) -> str:
         """Format log record as JSON or structured text."""
+        
+        # Add correlation ID if available
+        correlation_id = getattr(_thread_local, 'correlation_id', None)
+        if correlation_id:
+            record.correlation_id = correlation_id
         
         # Add custom fields
         record.service = self.service_name
@@ -43,6 +53,10 @@ class StructuredFormatter(logging.Formatter):
             'hostname': self.hostname,
         }
 
+        # Add correlation ID if present
+        if hasattr(record, 'correlation_id'):
+            log_data['correlation_id'] = record.correlation_id
+
         # Add exception info if present
         if record.exc_info:
             log_data['exception'] = {
@@ -57,7 +71,8 @@ class StructuredFormatter(logging.Formatter):
                           'levelname', 'levelno', 'lineno', 'module', 'msecs',
                           'message', 'pathname', 'process', 'processName',
                           'relativeCreated', 'thread', 'threadName', 'exc_info',
-                          'exc_text', 'stack_info', 'service', 'hostname']:
+                          'exc_text', 'stack_info', 'correlation_id', 'service',
+                          'hostname']:
                 log_data[key] = value
 
         return json.dumps(log_data)
@@ -67,14 +82,62 @@ class StructuredFormatter(logging.Formatter):
         # Build the base message
         timestamp = datetime.fromtimestamp(record.created).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
         
+        # Build correlation ID part
+        corr_id_str = ''
+        if hasattr(record, 'correlation_id'):
+            corr_id_str = f' [{record.correlation_id}]'
+        
         # Build the main log line
-        base_msg = f'{timestamp} {record.levelname:8s} [{record.name}] {record.getMessage()}'
+        base_msg = f'{timestamp} {record.levelname:8s} [{record.name}]{corr_id_str} {record.getMessage()}'
         
         # Add exception if present
         if record.exc_info:
             base_msg += '\n' + self.formatException(record.exc_info)
         
         return base_msg
+
+
+class SensitiveDataFilter(logging.Filter):
+    """
+    Filter to prevent logging of sensitive data.
+    
+    Redacts common sensitive patterns like API keys, tokens, passwords.
+    """
+    
+    SENSITIVE_PATTERNS = [
+        'password', 'token', 'api_key', 'secret', 'auth',
+        'credential', 'private_key', 'access_key'
+    ]
+    
+    def filter(self, record: logging.LogRecord) -> bool:
+        """Redact sensitive data from log messages."""
+        message = record.getMessage()
+        
+        # Simple redaction - in production, use regex for more sophisticated matching
+        for pattern in self.SENSITIVE_PATTERNS:
+            if pattern in message.lower():
+                # Redact the value after the sensitive key
+                record.msg = str(record.msg).replace(
+                    pattern, f'{pattern}=***REDACTED***'
+                )
+        
+        return True
+
+
+def set_correlation_id(correlation_id: str):
+    """Set correlation ID for the current thread."""
+    _thread_local.correlation_id = correlation_id
+
+
+def get_correlation_id() -> Optional[str]:
+    """Get correlation ID for the current thread."""
+    return getattr(_thread_local, 'correlation_id', None)
+
+
+def clear_correlation_id():
+    """Clear correlation ID for the current thread."""
+    if hasattr(_thread_local, 'correlation_id'):
+        delattr(_thread_local, 'correlation_id')
 
 
 def setup_logging(
@@ -149,6 +212,7 @@ def setup_logging(
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(numeric_level)
     console_handler.setFormatter(console_formatter)
+    console_handler.addFilter(SensitiveDataFilter())
     root_logger.addHandler(console_handler)
     
     # File handler with rotation
@@ -165,6 +229,7 @@ def setup_logging(
             )
             file_handler.setLevel(numeric_level)
             file_handler.setFormatter(file_formatter)
+            file_handler.addFilter(SensitiveDataFilter())
             root_logger.addHandler(file_handler)
             
             # Log initial message about file logging
