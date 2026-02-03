@@ -71,12 +71,12 @@ def validate_target_name(target_name: str) -> tuple[bool, str]:
     # Check against prohibited list
     if target_lower in PROHIBITED_TARGETS:
         logger.warning(
-            'Target name rejected - too broad',
+            "Target name rejected - too broad",
             extra={
-                'target_name': target_name,
-                'reason': 'prohibited_target',
-                'suggestion': 'Use a more specific application name'
-            }
+                "target_name": target_name,
+                "reason": "prohibited_target",
+                "suggestion": "Use a more specific application name",
+            },
         )
         return False, (
             f"Target name '{target_name}' is too broad and could kill critical processes. "
@@ -86,22 +86,19 @@ def validate_target_name(target_name: str) -> tuple[bool, str]:
     # Require minimum length for specificity
     if len(target_lower) < 3:
         logger.warning(
-            'Target name rejected - too short',
+            "Target name rejected - too short",
             extra={
-                'target_name': target_name,
-                'length': len(target_lower),
-                'reason': 'too_short'
-            }
+                "target_name": target_name,
+                "length": len(target_lower),
+                "reason": "too_short",
+            },
         )
         return False, (
             f"Target name '{target_name}' is too short (min 3 chars). "
             f"Use a specific application name to avoid accidental kills"
         )
 
-    logger.debug(
-        'Target name validation passed',
-        extra={'target_name': target_name}
-    )
+    logger.debug("Target name validation passed", extra={"target_name": target_name})
     return True, ""
 
 
@@ -142,12 +139,12 @@ def get_safe_target_processes(target_name):
     my_parent_pid = os.getppid()
 
     logger.debug(
-        'Scanning for target processes',
+        "Scanning for target processes",
         extra={
-            'target_name': target_name,
-            'my_pid': my_pid,
-            'my_parent_pid': my_parent_pid
-        }
+            "target_name": target_name,
+            "my_pid": my_pid,
+            "my_parent_pid": my_parent_pid,
+        },
     )
 
     # Get all PIDs in our process tree to avoid killing ourselves
@@ -157,16 +154,12 @@ def get_safe_target_processes(target_name):
         # Add all our children to protected list
         for child in my_process.children(recursive=True):
             protected_pids.add(child.pid)
-        
+
         logger.debug(
-            'Protected PIDs identified',
-            extra={'protected_pids': list(protected_pids)}
+            "Protected PIDs identified", extra={"protected_pids": list(protected_pids)}
         )
     except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
-        logger.warning(
-            'Could not enumerate child processes',
-            extra={'error': str(e)}
-        )
+        logger.warning("Could not enumerate child processes", extra={"error": str(e)})
 
     safe_targets = []
     scanned_count = 0
@@ -176,7 +169,7 @@ def get_safe_target_processes(target_name):
     try:
         for proc in psutil.process_iter(["pid", "name", "cmdline", "ppid"]):
             scanned_count += 1
-            
+
             try:
                 # Skip if this is a protected process
                 if proc.info["pid"] in protected_pids:
@@ -195,24 +188,24 @@ def get_safe_target_processes(target_name):
                 if is_critical_process(proc_name, cmdline):
                     skipped_critical += 1
                     logger.debug(
-                        'Skipping critical system process',
+                        "Skipping critical system process",
                         extra={
-                            'process_name': proc_name,
-                            'pid': proc.info['pid'],
-                            'reason': 'critical_process'
-                        }
+                            "process_name": proc_name,
+                            "pid": proc.info["pid"],
+                            "reason": "critical_process",
+                        },
                     )
                     continue
 
                 # Match by process name
                 if target_name.lower() in proc_name.lower():
                     logger.debug(
-                        'Found matching process by name',
+                        "Found matching process by name",
                         extra={
-                            'process_name': proc_name,
-                            'pid': proc.info['pid'],
-                            'match_type': 'name'
-                        }
+                            "process_name": proc_name,
+                            "pid": proc.info["pid"],
+                            "match_type": "name",
+                        },
                     )
                     safe_targets.append(proc)
                     continue
@@ -224,44 +217,44 @@ def get_safe_target_processes(target_name):
                         # Additional check: don't kill if cmdline contains 'chaos'
                         if "chaos" not in cmdline_str and "agent.py" not in cmdline_str:
                             logger.debug(
-                                'Found matching process by cmdline',
+                                "Found matching process by cmdline",
                                 extra={
-                                    'process_name': proc_name,
-                                    'pid': proc.info['pid'],
-                                    'cmdline': cmdline_str[:100],
-                                    'match_type': 'cmdline'
-                                }
+                                    "process_name": proc_name,
+                                    "pid": proc.info["pid"],
+                                    "cmdline": cmdline_str[:100],
+                                    "match_type": "cmdline",
+                                },
                             )
                             safe_targets.append(proc)
 
-            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess) as e:
+            except (
+                psutil.NoSuchProcess,
+                psutil.AccessDenied,
+                psutil.ZombieProcess,
+            ) as e:
                 # Process disappeared or we don't have access - skip it
                 logger.debug(
-                    'Could not access process',
+                    "Could not access process",
                     extra={
-                        'pid': proc.info.get('pid'),
-                        'error': str(e),
-                        'error_type': type(e).__name__
-                    }
+                        "pid": proc.info.get("pid"),
+                        "error": str(e),
+                        "error_type": type(e).__name__,
+                    },
                 )
                 continue
 
     except Exception as e:
-        logger.error(
-            'Error scanning processes',
-            exc_info=True,
-            extra={'error': str(e)}
-        )
+        logger.error("Error scanning processes", exc_info=True, extra={"error": str(e)})
 
     logger.info(
-        'Process scan completed',
+        "Process scan completed",
         extra={
-            'target_name': target_name,
-            'scanned_count': scanned_count,
-            'skipped_protected': skipped_protected,
-            'skipped_critical': skipped_critical,
-            'matches_found': len(safe_targets)
-        }
+            "target_name": target_name,
+            "scanned_count": scanned_count,
+            "skipped_protected": skipped_protected,
+            "skipped_critical": skipped_critical,
+            "matches_found": len(safe_targets),
+        },
     )
 
     return safe_targets
@@ -269,21 +262,21 @@ def get_safe_target_processes(target_name):
 
 def inject_process(config: dict, dry_run: bool = False):
     target_name = config.get("target_name")
-    
+
     if not target_name:
-        logger.warning('Process injection called without target_name in config')
+        logger.warning("Process injection called without target_name in config")
         return
 
     # VALIDATION: Check if target name is safe
     is_valid, error_msg = validate_target_name(target_name)
     if not is_valid:
         logger.error(
-            'Invalid target name for process injection',
+            "Invalid target name for process injection",
             extra={
-                'target_name': target_name,
-                'validation_error': error_msg,
-                'status': 'failed'
-            }
+                "target_name": target_name,
+                "validation_error": error_msg,
+                "status": "failed",
+            },
         )
         INJECTIONS_TOTAL.labels(failure_type="process", status="failed").inc()
         return
@@ -293,11 +286,8 @@ def inject_process(config: dict, dry_run: bool = False):
 
     if not target_procs:
         logger.info(
-            'No killable processes found matching target',
-            extra={
-                'target_name': target_name,
-                'status': 'skipped'
-            }
+            "No killable processes found matching target",
+            extra={"target_name": target_name, "status": "skipped"},
         )
         INJECTIONS_TOTAL.labels(failure_type="process", status="skipped").inc()
         return
@@ -316,98 +306,94 @@ def inject_process(config: dict, dry_run: bool = False):
 
         if dry_run:
             logger.info(
-                'Process kill (DRY RUN)',
+                "Process kill (DRY RUN)",
                 extra={
-                    'target_name': target_name,
-                    'process_name': name,
-                    'pid': pid,
-                    'cmdline': cmdline[:100],
-                    'dry_run': True
-                }
+                    "target_name": target_name,
+                    "process_name": name,
+                    "pid": pid,
+                    "cmdline": cmdline[:100],
+                    "dry_run": True,
+                },
             )
             INJECTIONS_TOTAL.labels(failure_type="process", status="skipped").inc()
             return
 
         logger.info(
-            'Initiating process termination',
+            "Initiating process termination",
             extra={
-                'target_name': target_name,
-                'process_name': name,
-                'pid': pid,
-                'cmdline': cmdline[:100],
-                'operation': 'process_kill'
-            }
+                "target_name": target_name,
+                "process_name": name,
+                "pid": pid,
+                "cmdline": cmdline[:100],
+                "operation": "process_kill",
+            },
         )
 
         # Use terminate() first (SIGTERM) - graceful
-        logger.debug(f'Sending SIGTERM to process {pid}')
+        logger.debug(f"Sending SIGTERM to process {pid}")
         target.terminate()
 
         # Wait briefly for graceful termination
         try:
             target.wait(timeout=3)
             logger.info(
-                'Process terminated gracefully',
+                "Process terminated gracefully",
                 extra={
-                    'pid': pid,
-                    'process_name': name,
-                    'method': 'SIGTERM',
-                    'status': 'success'
-                }
+                    "pid": pid,
+                    "process_name": name,
+                    "method": "SIGTERM",
+                    "status": "success",
+                },
             )
         except psutil.TimeoutExpired:
             # If still alive after 3s, force kill (SIGKILL)
             logger.warning(
-                'Process did not terminate gracefully, force killing',
-                extra={'pid': pid, 'process_name': name}
+                "Process did not terminate gracefully, force killing",
+                extra={"pid": pid, "process_name": name},
             )
             target.kill()
             target.wait(timeout=2)
             logger.info(
-                'Process force killed',
+                "Process force killed",
                 extra={
-                    'pid': pid,
-                    'process_name': name,
-                    'method': 'SIGKILL',
-                    'status': 'success'
-                }
+                    "pid": pid,
+                    "process_name": name,
+                    "method": "SIGKILL",
+                    "status": "success",
+                },
             )
 
         INJECTIONS_TOTAL.labels(failure_type="process", status="success").inc()
 
     except psutil.NoSuchProcess:
         logger.info(
-            'Process disappeared before kill could complete',
-            extra={
-                'pid': pid,
-                'process_name': name,
-                'status': 'skipped'
-            }
+            "Process disappeared before kill could complete",
+            extra={"pid": pid, "process_name": name, "status": "skipped"},
         )
         INJECTIONS_TOTAL.labels(failure_type="process", status="skipped").inc()
-        
+
     except psutil.AccessDenied:
         logger.error(
-            'Access denied when attempting to kill process',
+            "Access denied when attempting to kill process",
             extra={
-                'pid': pid,
-                'process_name': name,
-                'status': 'failed',
-                'error_type': 'AccessDenied'
-            }
+                "pid": pid,
+                "process_name": name,
+                "status": "failed",
+                "error_type": "AccessDenied",
+            },
         )
         INJECTIONS_TOTAL.labels(failure_type="process", status="failed").inc()
-        
+
     except Exception as e:
         logger.error(
-            'Process kill failed with unexpected error',
+            "Process kill failed with unexpected error",
             exc_info=True,
             extra={
-                'target_name': target_name,
-                'pid': pid if 'pid' in locals() else None,
-                'error': str(e),
-                'error_type': type(e).__name__,
-                'status': 'failed'
-            }
+                "target_name": target_name,
+                "pid": pid if "pid" in locals() else None,
+                "error": str(e),
+                "error_type": type(e).__name__,
+                "status": "failed",
+            },
         )
         INJECTIONS_TOTAL.labels(failure_type="process", status="failed").inc()
