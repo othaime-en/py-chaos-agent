@@ -1,28 +1,107 @@
+# Py-Chaos-Agent Configuration
+# This file controls all aspects of the chaos agent behavior
+
+# Agent configuration
 agent:
+  # How often to check and potentially inject failures (in seconds)
   interval_seconds: 10
+  
+  # Dry run mode - if true, logs what would happen without actually doing it
   dry_run: false
 
+# Logging configuration
+logging:
+  # Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL
+  # DEBUG - Very verbose, shows all operations (use in development)
+  # INFO - Standard operational logging (recommended for production)
+  # WARNING - Only important non-error events
+  # ERROR - Only errors and critical issues
+  level: INFO
+  
+  # Log format: 'text' (human-readable) or 'json' (structured, for log aggregators)
+  # Use 'text' for development/debugging
+  # Use 'json' for production with ELK, Splunk, etc.
+  format: text
+  
+  # Console logging (stdout/stderr)
+  console:
+    enabled: true
+  
+  # File logging with automatic rotation
+  file:
+    enabled: true
+    
+    # Path to log file
+    # For containers: /var/log/chaos-agent/agent.log
+    # For local dev: ./logs/agent.log
+    path: ./logs/agent.log
+    
+    # Maximum size of each log file before rotation (in MB)
+    max_size_mb: 10
+    
+    # Number of rotated backup files to keep
+    backup_count: 5
+
+# Failure injection configurations
 failures:
+  # CPU stress injection
   cpu:
     enabled: true
+    probability: 0.3  # 30% chance each interval
+    cores: 2          # Number of CPU cores to stress
     duration_seconds: 5
-    probability: 0.3
-    cores: 1
 
+  # Memory pressure injection
   memory:
     enabled: true
-    duration_seconds: 8
-    probability: 0.2
-    mb: 200
+    probability: 0.2  # 20% chance each interval
+    mb: 100           # Amount of memory to allocate (in MB)
+    duration_seconds: 10
 
+  # Process kill injection
   process:
-    enabled: true
-    target_name: "target-app" # or "nginx", "node", etc.
-    probability: 0.4
+    enabled: false    # Disabled by default (dangerous!)
+    probability: 0.1  # 10% chance each interval
+    target_name: "myapp"  # MUST be a specific process name
 
+  # Network latency injection
   network:
     enabled: true
-    interface: "eth0"
-    delay_ms: 300
-    duration_seconds: 10
-    probability: 0.25
+    probability: 0.25  # 25% chance each interval
+    interface: "eth0"  # Network interface to affect
+    delay_ms: 100      # Latency to add (in milliseconds)
+    duration_seconds: 15
+
+# Example configurations for different environments:
+
+# Development:
+# logging:
+#   level: DEBUG
+#   format: text
+#   console:
+#     enabled: true
+#   file:
+#     enabled: true
+#     path: ./logs/agent.log
+
+# Staging:
+# logging:
+#   level: INFO
+#   format: json
+#   console:
+#     enabled: true
+#   file:
+#     enabled: true
+#     path: /var/log/chaos-agent/agent.log
+
+# Production:
+# logging:
+#   level: INFO
+#   format: json
+#   console:
+#     enabled: true  # For kubectl logs
+#   file:
+#     enabled: true
+#     path: /var/log/chaos-agent/agent.log
+#     max_size_mb: 50
+#     backup_count: 10
