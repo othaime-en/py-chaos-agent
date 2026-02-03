@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+    <url>
+         <loc>https://othaime-en.github.io/py-chaos-agent/</loc>
+         <lastmod>2026-02-03</lastmod>
+    </url>
+    <url>
+         <loc>https://othaime-en.github.io/py-chaos-agent/safety/</loc>
+         <lastmod>2026-02-03</lastmod>
+    </url>
+    <url>
+         <loc>https://othaime-en.github.io/py-chaos-agent/development/development/</loc>
+         <lastmod>2026-02-03</lastmod>
+    </url>
+    <url>
+         <loc>https://othaime-en.github.io/py-chaos-agent/getting-started/configuration/</loc>
+         <lastmod>2026-02-03</lastmod>
+    </url>
+    <url>
+         <loc>https://othaime-en.github.io/py-chaos-agent/getting-started/installation/</loc>
+         <lastmod>2026-02-03</lastmod>
+    </url>
+    <url>
+         <loc>https://othaime-en.github.io/py-chaos-agent/user-guide/architecture/</loc>
+         <lastmod>2026-02-03</lastmod>
+    </url>
+    <url>
+         <loc>https://othaime-en.github.io/py-chaos-agent/user-guide/troubleshooting/</loc>
+         <lastmod>2026-02-03</lastmod>
+    </url>
+</urlset>
