@@ -62,7 +62,7 @@ failures:
   process:
     enabled: false    # Disabled by default (dangerous!)
     probability: 0.1  # 10% chance each interval
-    target_name: "myapp"  # MUST be a specific process name
+    target_name: "target-app"  # MUST be a specific process name
 
   # Network latency injection
   network:
