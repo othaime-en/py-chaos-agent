@@ -5,7 +5,6 @@ Provides programmatic control over chaos injections through REST API.
 """
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any, List
 from enum import Enum
@@ -14,7 +13,7 @@ import time
 from datetime import datetime
 from contextlib import asynccontextmanager
 
-from .config import Config, load_config
+from .config import load_config
 from .failures.cpu import inject_cpu
 from .failures.memory import inject_memory
 from .failures.process import inject_process

@@ -24,7 +24,7 @@ def reset_agent_state():
     agent_state["stop_event"].clear()
     try:
         agent_state["config"] = load_config()
-    except:
+    except Exception:
         pass
     yield
     # Cleanup after test
