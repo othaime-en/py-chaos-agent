@@ -21,6 +21,12 @@ from .failures.process import inject_process
 from .failures.network import inject_network
 from .logging_config import get_logger, set_correlation_id
 from .metrics import INJECTIONS_TOTAL, INJECTION_ACTIVE
+from .kill_switch import (
+    KillSwitch,
+    PRODUCTION_CONFIG,
+    wrap_injection_with_context,
+    CircuitState,
+)
 
 logger = get_logger(__name__)
 
@@ -34,6 +40,7 @@ class AgentState:
     agent_thread: Optional[threading.Thread] = None
     stop_event: threading.Event = threading.Event()
     start_time: Optional[float] = None
+    kill_switch: Optional[KillSwitch] = None
 
 
 agent_state = AgentState()
@@ -115,11 +122,7 @@ class FailureConfigResponse(BaseModel):
 
 
 def run_agent_loop():
-    """
-    Background agent loop - similar to main() in agent.py but controllable.
-
-    FIXED: Now gets fresh config each iteration to pick up runtime updates.
-    """
+    """Background agent loop with kill switch protection."""
     logger.info("API-controlled agent loop starting")
     start_time = time.time()
     agent_state.start_time = start_time
@@ -150,14 +153,60 @@ def run_agent_loop():
                 )
 
                 try:
+                    # Wrap injections with failure context tracking
+                    if agent_state.kill_switch:
+                        failure_context = agent_state.kill_switch.failure_context
+                    else:
+                        failure_context = None
+
                     if name == "cpu":
-                        inject_cpu(cfg, dry_run=config.agent.dry_run)
+                        if failure_context:
+                            wrap_injection_with_context(
+                                "cpu",
+                                inject_cpu,
+                                failure_context,
+                                cfg,
+                                dry_run=config.agent.dry_run,
+                            )
+                        else:
+                            inject_cpu(cfg, dry_run=config.agent.dry_run)
+
                     elif name == "memory":
-                        inject_memory(cfg, dry_run=config.agent.dry_run)
+                        if failure_context:
+                            wrap_injection_with_context(
+                                "memory",
+                                inject_memory,
+                                failure_context,
+                                cfg,
+                                dry_run=config.agent.dry_run,
+                            )
+                        else:
+                            inject_memory(cfg, dry_run=config.agent.dry_run)
+
                     elif name == "process":
-                        inject_process(cfg, dry_run=config.agent.dry_run)
+                        if failure_context:
+                            wrap_injection_with_context(
+                                "process",
+                                inject_process,
+                                failure_context,
+                                cfg,
+                                dry_run=config.agent.dry_run,
+                            )
+                        else:
+                            inject_process(cfg, dry_run=config.agent.dry_run)
+
                     elif name == "network":
-                        inject_network(cfg, dry_run=config.agent.dry_run)
+                        if failure_context:
+                            wrap_injection_with_context(
+                                "network",
+                                inject_network,
+                                failure_context,
+                                cfg,
+                                dry_run=config.agent.dry_run,
+                            )
+                        else:
+                            inject_network(cfg, dry_run=config.agent.dry_run)
+
                 except Exception as e:
                     logger.error(
                         f"Failure injection error: {e}",
@@ -165,8 +214,6 @@ def run_agent_loop():
                         extra={"failure_type": name},
                     )
 
-            # Wait for interval or stop signal
-            # Also get fresh config in case interval changed
             agent_state.stop_event.wait(config.agent.interval_seconds)
 
         except Exception as e:
@@ -175,7 +222,7 @@ def run_agent_loop():
                 config = get_config()
                 agent_state.stop_event.wait(config.agent.interval_seconds)
             except Exception:
-                agent_state.stop_event.wait(10)  # Fallback interval
+                agent_state.stop_event.wait(10)
 
     logger.info("API-controlled agent loop stopped")
     agent_state.enabled = False
@@ -228,8 +275,8 @@ async def get_status():
 
 
 @app.post("/agent/start", tags=["Agent Control"])
-async def start_agent():
-    """Start the chaos agent loop."""
+async def start_agent(enable_kill_switch: bool = True):
+    """Start the chaos agent loop with optional kill switch."""
     if agent_state.enabled:
         raise HTTPException(status_code=400, detail="Agent already running")
 
@@ -237,12 +284,42 @@ async def start_agent():
         raise HTTPException(status_code=500, detail="Configuration not loaded")
 
     logger.info("Starting chaos agent via API")
+
+    # Initialize kill switch if enabled
+    if enable_kill_switch:
+        # Get target health URL from config or use default
+        # config = get_config()
+
+        # Create kill switch with production config
+        kill_switch_config = PRODUCTION_CONFIG
+        # Override target URL if needed
+        # kill_switch_config.target_health_url = "http://target-app:8080/health"
+
+        agent_state.kill_switch = KillSwitch(kill_switch_config)
+
+        # Start monitoring with callback to stop agent
+        def stop_agent_callback():
+            logger.critical("Kill switch triggered, stopping agent")
+            agent_state.stop_event.set()
+
+        agent_state.kill_switch.start_monitoring(stop_agent_callback)
+        logger.info("Kill switch enabled and monitoring started")
+    else:
+        agent_state.kill_switch = None
+        logger.warning(
+            "Kill switch disabled - chaos will run without automatic protection"
+        )
+
     agent_state.stop_event.clear()
     agent_state.enabled = True
     agent_state.agent_thread = threading.Thread(target=run_agent_loop, daemon=True)
     agent_state.agent_thread.start()
 
-    return {"status": "started", "message": "Chaos agent started successfully"}
+    return {
+        "status": "started",
+        "message": "Chaos agent started successfully",
+        "kill_switch_enabled": enable_kill_switch,
+    }
 
 
 @app.post("/agent/stop", tags=["Agent Control"])
@@ -253,6 +330,11 @@ async def stop_agent():
 
     logger.info("Stopping chaos agent via API")
     agent_state.stop_event.set()
+
+    # Stop kill switch monitoring
+    if agent_state.kill_switch:
+        agent_state.kill_switch.stop_monitoring()
+        agent_state.kill_switch = None
 
     # Wait briefly for thread to stop
     if agent_state.agent_thread:
@@ -271,6 +353,30 @@ async def restart_agent():
         time.sleep(1)
 
     return await start_agent()
+
+
+@app.get("/kill-switch/status", tags=["Kill Switch"])
+async def get_kill_switch_status():
+    """Get current kill switch status."""
+    if not agent_state.kill_switch:
+        return {"enabled": False, "message": "Kill switch not initialized"}
+
+    return agent_state.kill_switch.get_status()
+
+
+@app.post("/kill-switch/reset", tags=["Kill Switch"])
+async def reset_kill_switch():
+    """Reset kill switch state (useful after manual recovery)."""
+    if not agent_state.kill_switch:
+        raise HTTPException(status_code=400, detail="Kill switch not initialized")
+
+    agent_state.kill_switch.consecutive_failures = 0
+    agent_state.kill_switch.consecutive_successes = 0
+    agent_state.kill_switch.circuit_state = CircuitState.CLOSED
+
+    logger.info("Kill switch state reset")
+
+    return {"status": "reset", "message": "Kill switch state has been reset"}
 
 
 # ============================================================================

@@ -42,6 +42,27 @@ logging:
     # Number of rotated backup files to keep
     backup_count: 5
 
+
+# Kill switch configuration
+kill_switch:
+  enabled: true
+  
+  # Health check settings
+  health_check_interval_seconds: 10
+  consecutive_failures_threshold: 3
+  
+  # Grace periods (seconds)
+  grace_after_process_kill_seconds: 60
+  grace_after_agent_start_seconds: 30
+  
+  # Recovery settings
+  recovery_test_interval_seconds: 120
+  recovery_success_threshold: 3
+  
+  # Target application
+  target_health_url: "http://localhost:8080/health"  # Adjust for your setup
+  health_check_timeout_seconds: 2
+
 # Failure injection configurations
 failures:
   # CPU stress injection

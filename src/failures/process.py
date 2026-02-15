@@ -129,6 +129,18 @@ def is_critical_process(proc_name: str, cmdline: list) -> bool:
     return False
 
 
+def is_pid_1(proc: psutil.Process) -> bool:
+    """
+    Check if this is PID 1 (special in containers with shared process namespace).
+
+    PID 1 in containers has special signal handling and cannot be killed normally.
+    """
+    try:
+        return proc.pid == 1
+    except (AttributeError, TypeError):
+        return False
+
+
 def get_safe_target_processes(target_name):
     """
     Find target processes while excluding the chaos agent itself.
@@ -260,6 +272,154 @@ def get_safe_target_processes(target_name):
     return safe_targets
 
 
+def terminate_process(proc, target_name: str) -> None:
+    """
+    Terminate a process, with special handling for PID 1.
+
+    PID 1 in containers (when using shareProcessNamespace) cannot be
+    killed normally - it will restart the entire container instead.
+    """
+    try:
+        pid = proc.pid
+        name = proc.info["name"]
+        cmdline = (
+            " ".join(proc.info.get("cmdline", []))
+            if proc.info.get("cmdline")
+            else "N/A"
+        )
+
+        # Check if this is PID 1
+        if is_pid_1(proc):
+            logger.warning(
+                "Target process is PID 1 (container init process)",
+                extra={
+                    "pid": pid,
+                    "process_name": name,
+                    "note": "Killing PID 1 will restart the entire container",
+                },
+            )
+
+            # For PID 1, we just send the signal and let the container restart
+            # Don't wait for it to exit - that will never happen in the expected way
+            logger.info(
+                "Sending SIGKILL to PID 1 (will trigger container restart)",
+                extra={"pid": pid, "process_name": name},
+            )
+
+            try:
+                # Send SIGKILL directly - SIGTERM doesn't work reliably on PID 1
+                proc.kill()
+
+                # Don't wait - the container will restart
+                logger.info(
+                    "Signal sent to PID 1, container will restart",
+                    extra={
+                        "pid": pid,
+                        "process_name": name,
+                        "method": "SIGKILL",
+                        "status": "success",
+                    },
+                )
+
+                INJECTIONS_TOTAL.labels(failure_type="process", status="success").inc()
+
+            except psutil.AccessDenied:
+                logger.error(
+                    "Access denied when attempting to kill PID 1",
+                    extra={
+                        "pid": pid,
+                        "process_name": name,
+                        "status": "failed",
+                    },
+                )
+                INJECTIONS_TOTAL.labels(failure_type="process", status="failed").inc()
+
+            return  # Exit early - don't try to wait
+
+        # Normal process (not PID 1) - use standard termination
+        logger.info(
+            "Initiating process termination",
+            extra={
+                "target_name": target_name,
+                "process_name": name,
+                "pid": pid,
+                "cmdline": cmdline[:100],
+                "operation": "process_kill",
+            },
+        )
+
+        # Use terminate() first (SIGTERM) - graceful
+        logger.debug(f"Sending SIGTERM to process {pid}")
+        proc.terminate()
+
+        # Wait briefly for graceful termination
+        try:
+            proc.wait(timeout=3)
+            logger.info(
+                "Process terminated gracefully",
+                extra={
+                    "pid": pid,
+                    "process_name": name,
+                    "method": "SIGTERM",
+                    "status": "success",
+                },
+            )
+            INJECTIONS_TOTAL.labels(failure_type="process", status="success").inc()
+
+        except psutil.TimeoutExpired:
+            # If still alive after 3s, force kill (SIGKILL)
+            logger.warning(
+                "Process did not terminate gracefully, force killing",
+                extra={"pid": pid, "process_name": name},
+            )
+            proc.kill()
+
+            try:
+                proc.wait(timeout=2)
+                logger.info(
+                    "Process force killed",
+                    extra={
+                        "pid": pid,
+                        "process_name": name,
+                        "method": "SIGKILL",
+                        "status": "success",
+                    },
+                )
+                INJECTIONS_TOTAL.labels(failure_type="process", status="success").inc()
+
+            except psutil.TimeoutExpired:
+                # Process still running after SIGKILL - very unusual
+                logger.error(
+                    "Process survived SIGKILL",
+                    extra={
+                        "pid": pid,
+                        "process_name": name,
+                        "status": "failed",
+                        "note": "This is highly unusual and may indicate a zombie process",
+                    },
+                )
+                INJECTIONS_TOTAL.labels(failure_type="process", status="failed").inc()
+
+    except psutil.NoSuchProcess:
+        logger.info(
+            "Process disappeared before kill could complete",
+            extra={"pid": pid if "pid" in locals() else None, "status": "skipped"},
+        )
+        INJECTIONS_TOTAL.labels(failure_type="process", status="skipped").inc()
+
+    except psutil.AccessDenied:
+        logger.error(
+            "Access denied when attempting to kill process",
+            extra={
+                "pid": pid if "pid" in locals() else None,
+                "process_name": name if "name" in locals() else None,
+                "status": "failed",
+                "error_type": "AccessDenied",
+            },
+        )
+        INJECTIONS_TOTAL.labels(failure_type="process", status="failed").inc()
+
+
 def inject_process(config: dict, dry_run: bool = False):
     target_name = config.get("target_name")
 
@@ -313,76 +473,14 @@ def inject_process(config: dict, dry_run: bool = False):
                     "pid": pid,
                     "cmdline": cmdline[:100],
                     "dry_run": True,
+                    "is_pid_1": is_pid_1(target),
                 },
             )
             INJECTIONS_TOTAL.labels(failure_type="process", status="skipped").inc()
             return
 
-        logger.info(
-            "Initiating process termination",
-            extra={
-                "target_name": target_name,
-                "process_name": name,
-                "pid": pid,
-                "cmdline": cmdline[:100],
-                "operation": "process_kill",
-            },
-        )
-
-        # Use terminate() first (SIGTERM) - graceful
-        logger.debug(f"Sending SIGTERM to process {pid}")
-        target.terminate()
-
-        # Wait briefly for graceful termination
-        try:
-            target.wait(timeout=3)
-            logger.info(
-                "Process terminated gracefully",
-                extra={
-                    "pid": pid,
-                    "process_name": name,
-                    "method": "SIGTERM",
-                    "status": "success",
-                },
-            )
-        except psutil.TimeoutExpired:
-            # If still alive after 3s, force kill (SIGKILL)
-            logger.warning(
-                "Process did not terminate gracefully, force killing",
-                extra={"pid": pid, "process_name": name},
-            )
-            target.kill()
-            target.wait(timeout=2)
-            logger.info(
-                "Process force killed",
-                extra={
-                    "pid": pid,
-                    "process_name": name,
-                    "method": "SIGKILL",
-                    "status": "success",
-                },
-            )
-
-        INJECTIONS_TOTAL.labels(failure_type="process", status="success").inc()
-
-    except psutil.NoSuchProcess:
-        logger.info(
-            "Process disappeared before kill could complete",
-            extra={"pid": pid, "process_name": name, "status": "skipped"},
-        )
-        INJECTIONS_TOTAL.labels(failure_type="process", status="skipped").inc()
-
-    except psutil.AccessDenied:
-        logger.error(
-            "Access denied when attempting to kill process",
-            extra={
-                "pid": pid,
-                "process_name": name,
-                "status": "failed",
-                "error_type": "AccessDenied",
-            },
-        )
-        INJECTIONS_TOTAL.labels(failure_type="process", status="failed").inc()
+        # Use the terminate function that handles PID 1 correctly
+        terminate_process(target, target_name)
 
     except Exception as e:
         logger.error(
