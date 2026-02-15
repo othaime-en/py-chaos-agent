@@ -27,6 +27,7 @@ logger = get_logger(__name__)
 # Global state with proper typing
 class AgentState:
     """Global state for the chaos agent."""
+
     enabled: bool = False
     config: Optional[Config] = None
     agent_thread: Optional[threading.Thread] = None
@@ -205,9 +206,7 @@ async def get_status():
     if agent_state.enabled and agent_state.start_time is not None:
         uptime = time.time() - agent_state.start_time
 
-    enabled_failures = [
-        name for name, cfg in config.failures.items() if cfg["enabled"]
-    ]
+    enabled_failures = [name for name, cfg in config.failures.items() if cfg["enabled"]]
 
     return AgentStatus(
         enabled=agent_state.enabled,
