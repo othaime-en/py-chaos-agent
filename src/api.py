@@ -10,6 +10,7 @@ from typing import Optional, Dict, Any, List
 from enum import Enum
 import threading
 import time
+import random
 from datetime import datetime
 from contextlib import asynccontextmanager
 
@@ -114,9 +115,12 @@ class FailureConfigResponse(BaseModel):
 
 
 def run_agent_loop():
-    """Background agent loop - similar to main() in agent.py but controllable."""
+    """
+    Background agent loop - similar to main() in agent.py but controllable.
+
+    FIXED: Now gets fresh config each iteration to pick up runtime updates.
+    """
     logger.info("API-controlled agent loop starting")
-    config = get_config()
     start_time = time.time()
     agent_state.start_time = start_time
     iteration = 0
@@ -127,14 +131,14 @@ def run_agent_loop():
             correlation_id = f"api-iter-{iteration}-{int(time.time())}"
             set_correlation_id(correlation_id)
 
+            config = get_config()
+
             for name, cfg in config.failures.items():
                 if agent_state.stop_event.is_set():
                     break
 
                 if not cfg["enabled"]:
                     continue
-
-                import random
 
                 probability = cfg["probability"]
                 if random.random() > probability:
@@ -162,11 +166,16 @@ def run_agent_loop():
                     )
 
             # Wait for interval or stop signal
+            # Also get fresh config in case interval changed
             agent_state.stop_event.wait(config.agent.interval_seconds)
 
         except Exception as e:
             logger.error(f"Error in agent loop: {e}", exc_info=True)
-            agent_state.stop_event.wait(config.agent.interval_seconds)
+            try:
+                config = get_config()
+                agent_state.stop_event.wait(config.agent.interval_seconds)
+            except Exception:
+                agent_state.stop_event.wait(10)  # Fallback interval
 
     logger.info("API-controlled agent loop stopped")
     agent_state.enabled = False
