@@ -76,6 +76,9 @@ spec:
               add: ["NET_ADMIN"] # Required for tc
           ports:
             - containerPort: 8000 # metrics
+              name: metrics
+            - containerPort: 9000 # api
+              name: api
           env:
             - name: LOG_LEVEL
               value: INFO
@@ -87,6 +90,18 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 9000
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 9000
+            initialDelaySeconds: 5
+            periodSeconds: 10
 
       volumes:
         - name: config
@@ -94,3 +109,37 @@ spec:
             name: chaos-config
         - name: logs
           emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: resilient-app
+  namespace: chaos-demo
+spec:
+  selector:
+    app: resilient-app
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: chaos-agent-api
+  namespace: chaos-demo
+spec:
+  selector:
+    app: resilient-app
+  ports:
+    - name: api
+      port: 9000
+      targetPort: 9000
+      protocol: TCP
+    - name: metrics
+      port: 8000
+      targetPort: 8000
+      protocol: TCP
+  type: ClusterIP
