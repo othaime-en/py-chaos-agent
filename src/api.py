@@ -23,9 +23,9 @@ from .logging_config import get_logger, set_correlation_id
 from .metrics import INJECTIONS_TOTAL, INJECTION_ACTIVE
 from .kill_switch import (
     KillSwitch,
-    KillSwitchConfig,
     PRODUCTION_CONFIG,
     wrap_injection_with_context,
+    CircuitState,
 )
 
 logger = get_logger(__name__)
@@ -120,6 +120,7 @@ class FailureConfigResponse(BaseModel):
 # Agent Control
 # ============================================================================
 
+
 def run_agent_loop():
     """Background agent loop with kill switch protection."""
     logger.info("API-controlled agent loop starting")
@@ -157,43 +158,55 @@ def run_agent_loop():
                         failure_context = agent_state.kill_switch.failure_context
                     else:
                         failure_context = None
-                    
+
                     if name == "cpu":
                         if failure_context:
                             wrap_injection_with_context(
-                                "cpu", inject_cpu, failure_context,
-                                cfg, dry_run=config.agent.dry_run
+                                "cpu",
+                                inject_cpu,
+                                failure_context,
+                                cfg,
+                                dry_run=config.agent.dry_run,
                             )
                         else:
                             inject_cpu(cfg, dry_run=config.agent.dry_run)
-                    
+
                     elif name == "memory":
                         if failure_context:
                             wrap_injection_with_context(
-                                "memory", inject_memory, failure_context,
-                                cfg, dry_run=config.agent.dry_run
+                                "memory",
+                                inject_memory,
+                                failure_context,
+                                cfg,
+                                dry_run=config.agent.dry_run,
                             )
                         else:
                             inject_memory(cfg, dry_run=config.agent.dry_run)
-                    
+
                     elif name == "process":
                         if failure_context:
                             wrap_injection_with_context(
-                                "process", inject_process, failure_context,
-                                cfg, dry_run=config.agent.dry_run
+                                "process",
+                                inject_process,
+                                failure_context,
+                                cfg,
+                                dry_run=config.agent.dry_run,
                             )
                         else:
                             inject_process(cfg, dry_run=config.agent.dry_run)
-                    
+
                     elif name == "network":
                         if failure_context:
                             wrap_injection_with_context(
-                                "network", inject_network, failure_context,
-                                cfg, dry_run=config.agent.dry_run
+                                "network",
+                                inject_network,
+                                failure_context,
+                                cfg,
+                                dry_run=config.agent.dry_run,
                             )
                         else:
                             inject_network(cfg, dry_run=config.agent.dry_run)
-                
+
                 except Exception as e:
                     logger.error(
                         f"Failure injection error: {e}",
@@ -208,11 +221,12 @@ def run_agent_loop():
             try:
                 config = get_config()
                 agent_state.stop_event.wait(config.agent.interval_seconds)
-            except:
+            except Exception:
                 agent_state.stop_event.wait(10)
 
     logger.info("API-controlled agent loop stopped")
     agent_state.enabled = False
+
 
 # ============================================================================
 # API Endpoints
@@ -270,30 +284,32 @@ async def start_agent(enable_kill_switch: bool = True):
         raise HTTPException(status_code=500, detail="Configuration not loaded")
 
     logger.info("Starting chaos agent via API")
-    
+
     # Initialize kill switch if enabled
     if enable_kill_switch:
         # Get target health URL from config or use default
-        config = get_config()
-        
+        # config = get_config()
+
         # Create kill switch with production config
         kill_switch_config = PRODUCTION_CONFIG
         # Override target URL if needed
         # kill_switch_config.target_health_url = "http://target-app:8080/health"
-        
+
         agent_state.kill_switch = KillSwitch(kill_switch_config)
-        
+
         # Start monitoring with callback to stop agent
         def stop_agent_callback():
             logger.critical("Kill switch triggered, stopping agent")
             agent_state.stop_event.set()
-        
+
         agent_state.kill_switch.start_monitoring(stop_agent_callback)
         logger.info("Kill switch enabled and monitoring started")
     else:
         agent_state.kill_switch = None
-        logger.warning("Kill switch disabled - chaos will run without automatic protection")
-    
+        logger.warning(
+            "Kill switch disabled - chaos will run without automatic protection"
+        )
+
     agent_state.stop_event.clear()
     agent_state.enabled = True
     agent_state.agent_thread = threading.Thread(target=run_agent_loop, daemon=True)
@@ -304,6 +320,7 @@ async def start_agent(enable_kill_switch: bool = True):
         "message": "Chaos agent started successfully",
         "kill_switch_enabled": enable_kill_switch,
     }
+
 
 @app.post("/agent/stop", tags=["Agent Control"])
 async def stop_agent():
@@ -342,11 +359,8 @@ async def restart_agent():
 async def get_kill_switch_status():
     """Get current kill switch status."""
     if not agent_state.kill_switch:
-        return {
-            "enabled": False,
-            "message": "Kill switch not initialized"
-        }
-    
+        return {"enabled": False, "message": "Kill switch not initialized"}
+
     return agent_state.kill_switch.get_status()
 
 
@@ -355,17 +369,14 @@ async def reset_kill_switch():
     """Reset kill switch state (useful after manual recovery)."""
     if not agent_state.kill_switch:
         raise HTTPException(status_code=400, detail="Kill switch not initialized")
-    
+
     agent_state.kill_switch.consecutive_failures = 0
     agent_state.kill_switch.consecutive_successes = 0
-    agent_state.kill_switch.circuit_state = agent_state.kill_switch.CircuitState.CLOSED
-    
+    agent_state.kill_switch.circuit_state = CircuitState.CLOSED
+
     logger.info("Kill switch state reset")
-    
-    return {
-        "status": "reset",
-        "message": "Kill switch state has been reset"
-    }
+
+    return {"status": "reset", "message": "Kill switch state has been reset"}
 
 
 # ============================================================================
