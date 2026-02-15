@@ -1,4 +1,3 @@
-version: '3.8'
 services:
   target-app:
     build:
@@ -18,8 +17,15 @@ services:
       - ./config.yaml:/app/config.yaml:ro
       - ./logs:/var/log/chaos-agent
     ports:
-      - "8000:8000"
+      - "8000:8000" # Metrics
+      - "9000:9000" # API
     environment:
       - LOG_LEVEL=INFO
       - JSON_LOGS=true
       - LOG_FILE=/var/log/chaos-agent/agent.log
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -f http://localhost:9000/health || exit 1" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
