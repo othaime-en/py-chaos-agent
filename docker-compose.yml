@@ -5,6 +5,8 @@ services:
       dockerfile: docker/Dockerfile.target
     ports:
       - "8080:8080"
+      - "8000:8000"
+      - "9000:9000"
     restart: always
 
   chaos-agent:
@@ -17,9 +19,6 @@ services:
     volumes:
       - ./config.yaml:/app/config.yaml:ro
       - ./logs:/var/log/chaos-agent
-    ports:
-      - "8000:8000" # Metrics
-      - "9000:9000" # API
     environment:
       - LOG_LEVEL=INFO
       - JSON_LOGS=true
