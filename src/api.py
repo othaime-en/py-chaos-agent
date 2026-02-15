@@ -32,6 +32,7 @@ agent_state = {
     "stop_event": threading.Event(),
 }
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan event handler for startup and shutdown."""
@@ -43,13 +44,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Failed to load config on startup: {e}")
         agent_state["config"] = None
-    
+
     yield
-    
+
     # Shutdown (optional cleanup)
     if agent_state["enabled"]:
         logger.info("Shutting down agent on API shutdown")
         agent_state["stop_event"].set()
+
 
 app = FastAPI(
     title="Py-Chaos-Agent API",
@@ -57,7 +59,6 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
-
 
 
 class FailureType(str, Enum):
@@ -154,7 +155,6 @@ def run_agent_loop():
     agent_state["enabled"] = False
 
 
-
 @app.get("/", tags=["General"])
 async def root():
     """API root - health check."""
@@ -187,9 +187,7 @@ async def get_status():
     if agent_state["enabled"] and "start_time" in agent_state:
         uptime = time.time() - agent_state["start_time"]
 
-    enabled_failures = [
-        name for name, cfg in config.failures.items() if cfg["enabled"]
-    ]
+    enabled_failures = [name for name, cfg in config.failures.items() if cfg["enabled"]]
 
     return AgentStatus(
         enabled=agent_state["enabled"],
@@ -263,7 +261,9 @@ async def manual_injection(
     failure_type = request.failure_type.value
 
     if failure_type not in config.failures:
-        raise HTTPException(status_code=404, detail=f"Failure type '{failure_type}' not found")
+        raise HTTPException(
+            status_code=404, detail=f"Failure type '{failure_type}' not found"
+        )
 
     # Use provided config or fall back to loaded config
     failure_config = request.config if request.config else config.failures[failure_type]
@@ -297,7 +297,6 @@ async def manual_injection(
     }
 
 
-
 @app.get("/config", tags=["Configuration"])
 async def get_config():
     """Get current agent configuration."""
@@ -315,7 +314,11 @@ async def get_config():
     }
 
 
-@app.get("/config/failures/{failure_type}", response_model=FailureConfigResponse, tags=["Configuration"])
+@app.get(
+    "/config/failures/{failure_type}",
+    response_model=FailureConfigResponse,
+    tags=["Configuration"],
+)
 async def get_failure_config(failure_type: FailureType):
     """Get configuration for a specific failure type."""
     if agent_state["config"] is None:
@@ -325,7 +328,9 @@ async def get_failure_config(failure_type: FailureType):
     failure_name = failure_type.value
 
     if failure_name not in config.failures:
-        raise HTTPException(status_code=404, detail=f"Failure type '{failure_name}' not found")
+        raise HTTPException(
+            status_code=404, detail=f"Failure type '{failure_name}' not found"
+        )
 
     failure_config = config.failures[failure_name]
 
@@ -370,12 +375,18 @@ async def update_config(request: ConfigUpdateRequest):
         "status": "updated",
         "message": "Configuration updated successfully",
         "changes": changes,
-        "note": "Changes take effect immediately" if agent_state["enabled"] else "Changes will take effect when agent starts",
+        "note": (
+            "Changes take effect immediately"
+            if agent_state["enabled"]
+            else "Changes will take effect when agent starts"
+        ),
     }
 
 
 @app.patch("/config/failures/{failure_type}", tags=["Configuration"])
-async def update_failure_config(failure_type: FailureType, config_update: Dict[str, Any]):
+async def update_failure_config(
+    failure_type: FailureType, config_update: Dict[str, Any]
+):
     """Update configuration for a specific failure type."""
     if agent_state["config"] is None:
         raise HTTPException(status_code=500, detail="Configuration not loaded")
@@ -384,7 +395,9 @@ async def update_failure_config(failure_type: FailureType, config_update: Dict[s
     failure_name = failure_type.value
 
     if failure_name not in config.failures:
-        raise HTTPException(status_code=404, detail=f"Failure type '{failure_name}' not found")
+        raise HTTPException(
+            status_code=404, detail=f"Failure type '{failure_name}' not found"
+        )
 
     config.failures[failure_name].update(config_update)
 
@@ -411,27 +424,38 @@ async def reload_config():
         return {
             "status": "reloaded",
             "message": "Configuration reloaded successfully from config.yaml",
-            "note": "Agent must be restarted for changes to take full effect" if agent_state["enabled"] else None,
+            "note": (
+                "Agent must be restarted for changes to take full effect"
+                if agent_state["enabled"]
+                else None
+            ),
         }
     except Exception as e:
         logger.error(f"Failed to reload config: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to reload config: {str(e)}")
-
+        raise HTTPException(
+            status_code=500, detail=f"Failed to reload config: {str(e)}"
+        )
 
 
 @app.get("/metrics/summary", tags=["Metrics"])
 async def get_metrics_summary():
     """Get summary of chaos injection metrics."""
-    
+
     # Collect metrics for all failure types
     summary = {}
-    
+
     for failure_type in ["cpu", "memory", "process", "network"]:
-        success = INJECTIONS_TOTAL.labels(failure_type=failure_type, status="success")._value.get()
-        failed = INJECTIONS_TOTAL.labels(failure_type=failure_type, status="failed")._value.get()
-        skipped = INJECTIONS_TOTAL.labels(failure_type=failure_type, status="skipped")._value.get()
+        success = INJECTIONS_TOTAL.labels(
+            failure_type=failure_type, status="success"
+        )._value.get()
+        failed = INJECTIONS_TOTAL.labels(
+            failure_type=failure_type, status="failed"
+        )._value.get()
+        skipped = INJECTIONS_TOTAL.labels(
+            failure_type=failure_type, status="skipped"
+        )._value.get()
         active = INJECTION_ACTIVE.labels(failure_type=failure_type)._value.get()
-        
+
         summary[failure_type] = {
             "success": success,
             "failed": failed,
@@ -439,7 +463,7 @@ async def get_metrics_summary():
             "active": active,
             "total": success + failed + skipped,
         }
-    
+
     return {
         "timestamp": datetime.utcnow().isoformat() + "Z",
         "metrics": summary,
@@ -450,10 +474,10 @@ async def get_metrics_summary():
 async def reset_metrics():
     """Reset all metrics counters (useful for testing)."""
     logger.warning("Metrics reset requested via API")
-    
+
     INJECTIONS_TOTAL._metrics.clear()
     INJECTION_ACTIVE._metrics.clear()
-    
+
     return {
         "status": "reset",
         "message": "All metrics have been reset",
