@@ -12,6 +12,7 @@ from enum import Enum
 import threading
 import time
 from datetime import datetime
+from contextlib import asynccontextmanager
 
 from .config import Config, load_config
 from .failures.cpu import inject_cpu
@@ -31,10 +32,30 @@ agent_state = {
     "stop_event": threading.Event(),
 }
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan event handler for startup and shutdown."""
+    # Startup
+    try:
+        config = load_config()
+        agent_state["config"] = config
+        logger.info("API started, configuration loaded")
+    except Exception as e:
+        logger.error(f"Failed to load config on startup: {e}")
+        agent_state["config"] = None
+    
+    yield
+    
+    # Shutdown (optional cleanup)
+    if agent_state["enabled"]:
+        logger.info("Shutting down agent on API shutdown")
+        agent_state["stop_event"].set()
+
 app = FastAPI(
     title="Py-Chaos-Agent API",
     description="REST API for controlling chaos engineering experiments",
     version="1.0.0",
+    lifespan=lifespan,
 )
 
 
@@ -132,18 +153,6 @@ def run_agent_loop():
     logger.info("API-controlled agent loop stopped")
     agent_state["enabled"] = False
 
-
-
-@app.on_event("startup")
-async def startup_event():
-    """Load configuration on startup."""
-    try:
-        config = load_config()
-        agent_state["config"] = config
-        logger.info("API started, configuration loaded")
-    except Exception as e:
-        logger.error(f"Failed to load config on startup: {e}")
-        agent_state["config"] = None
 
 
 @app.get("/", tags=["General"])
