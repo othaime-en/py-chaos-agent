@@ -13,7 +13,7 @@ import time
 from datetime import datetime
 from contextlib import asynccontextmanager
 
-from .config import load_config
+from .config import Config, load_config
 from .failures.cpu import inject_cpu
 from .failures.memory import inject_memory
 from .failures.process import inject_process
@@ -23,13 +23,25 @@ from .metrics import INJECTIONS_TOTAL, INJECTION_ACTIVE
 
 logger = get_logger(__name__)
 
-# Global state
-agent_state = {
-    "enabled": False,
-    "config": None,
-    "agent_thread": None,
-    "stop_event": threading.Event(),
-}
+
+# Global state with proper typing
+class AgentState:
+    """Global state for the chaos agent."""
+    enabled: bool = False
+    config: Optional[Config] = None
+    agent_thread: Optional[threading.Thread] = None
+    stop_event: threading.Event = threading.Event()
+    start_time: Optional[float] = None
+
+
+agent_state = AgentState()
+
+
+def get_config() -> Config:
+    """Get config with type safety."""
+    if agent_state.config is None:
+        raise HTTPException(status_code=500, detail="Configuration not loaded")
+    return agent_state.config
 
 
 @asynccontextmanager
@@ -38,18 +50,18 @@ async def lifespan(app: FastAPI):
     # Startup
     try:
         config = load_config()
-        agent_state["config"] = config
+        agent_state.config = config
         logger.info("API started, configuration loaded")
     except Exception as e:
         logger.error(f"Failed to load config on startup: {e}")
-        agent_state["config"] = None
+        agent_state.config = None
 
     yield
 
     # Shutdown (optional cleanup)
-    if agent_state["enabled"]:
+    if agent_state.enabled:
         logger.info("Shutting down agent on API shutdown")
-        agent_state["stop_event"].set()
+        agent_state.stop_event.set()
 
 
 app = FastAPI(
@@ -95,22 +107,27 @@ class FailureConfigResponse(BaseModel):
     config: Dict[str, Any]
 
 
+# ============================================================================
+# Agent Control
+# ============================================================================
+
+
 def run_agent_loop():
     """Background agent loop - similar to main() in agent.py but controllable."""
     logger.info("API-controlled agent loop starting")
-    config = agent_state["config"]
+    config = get_config()
     start_time = time.time()
-    agent_state["start_time"] = start_time
+    agent_state.start_time = start_time
     iteration = 0
 
-    while not agent_state["stop_event"].is_set():
+    while not agent_state.stop_event.is_set():
         try:
             iteration += 1
             correlation_id = f"api-iter-{iteration}-{int(time.time())}"
             set_correlation_id(correlation_id)
 
             for name, cfg in config.failures.items():
-                if agent_state["stop_event"].is_set():
+                if agent_state.stop_event.is_set():
                     break
 
                 if not cfg["enabled"]:
@@ -144,14 +161,19 @@ def run_agent_loop():
                     )
 
             # Wait for interval or stop signal
-            agent_state["stop_event"].wait(config.agent.interval_seconds)
+            agent_state.stop_event.wait(config.agent.interval_seconds)
 
         except Exception as e:
             logger.error(f"Error in agent loop: {e}", exc_info=True)
-            agent_state["stop_event"].wait(config.agent.interval_seconds)
+            agent_state.stop_event.wait(config.agent.interval_seconds)
 
     logger.info("API-controlled agent loop stopped")
-    agent_state["enabled"] = False
+    agent_state.enabled = False
+
+
+# ============================================================================
+# API Endpoints
+# ============================================================================
 
 
 @app.get("/", tags=["General"])
@@ -161,7 +183,7 @@ async def root():
         "service": "py-chaos-agent",
         "version": "1.0.0",
         "status": "running",
-        "agent_enabled": agent_state["enabled"],
+        "agent_enabled": agent_state.enabled,
     }
 
 
@@ -170,26 +192,25 @@ async def health():
     """Health check endpoint."""
     return {
         "status": "healthy",
-        "config_loaded": agent_state["config"] is not None,
-        "agent_enabled": agent_state["enabled"],
+        "config_loaded": agent_state.config is not None,
+        "agent_enabled": agent_state.enabled,
     }
 
 
 @app.get("/status", response_model=AgentStatus, tags=["Agent Control"])
 async def get_status():
     """Get current agent status."""
-    if agent_state["config"] is None:
-        raise HTTPException(status_code=500, detail="Configuration not loaded")
-
-    config = agent_state["config"]
+    config = get_config()
     uptime = None
-    if agent_state["enabled"] and "start_time" in agent_state:
-        uptime = time.time() - agent_state["start_time"]
+    if agent_state.enabled and agent_state.start_time is not None:
+        uptime = time.time() - agent_state.start_time
 
-    enabled_failures = [name for name, cfg in config.failures.items() if cfg["enabled"]]
+    enabled_failures = [
+        name for name, cfg in config.failures.items() if cfg["enabled"]
+    ]
 
     return AgentStatus(
-        enabled=agent_state["enabled"],
+        enabled=agent_state.enabled,
         uptime_seconds=uptime,
         config_loaded=True,
         dry_run=config.agent.dry_run,
@@ -201,17 +222,17 @@ async def get_status():
 @app.post("/agent/start", tags=["Agent Control"])
 async def start_agent():
     """Start the chaos agent loop."""
-    if agent_state["enabled"]:
+    if agent_state.enabled:
         raise HTTPException(status_code=400, detail="Agent already running")
 
-    if agent_state["config"] is None:
+    if agent_state.config is None:
         raise HTTPException(status_code=500, detail="Configuration not loaded")
 
     logger.info("Starting chaos agent via API")
-    agent_state["stop_event"].clear()
-    agent_state["enabled"] = True
-    agent_state["agent_thread"] = threading.Thread(target=run_agent_loop, daemon=True)
-    agent_state["agent_thread"].start()
+    agent_state.stop_event.clear()
+    agent_state.enabled = True
+    agent_state.agent_thread = threading.Thread(target=run_agent_loop, daemon=True)
+    agent_state.agent_thread.start()
 
     return {"status": "started", "message": "Chaos agent started successfully"}
 
@@ -219,17 +240,17 @@ async def start_agent():
 @app.post("/agent/stop", tags=["Agent Control"])
 async def stop_agent():
     """Stop the chaos agent loop."""
-    if not agent_state["enabled"]:
+    if not agent_state.enabled:
         raise HTTPException(status_code=400, detail="Agent not running")
 
     logger.info("Stopping chaos agent via API")
-    agent_state["stop_event"].set()
+    agent_state.stop_event.set()
 
     # Wait briefly for thread to stop
-    if agent_state["agent_thread"]:
-        agent_state["agent_thread"].join(timeout=5)
+    if agent_state.agent_thread:
+        agent_state.agent_thread.join(timeout=5)
 
-    agent_state["enabled"] = False
+    agent_state.enabled = False
 
     return {"status": "stopped", "message": "Chaos agent stopped successfully"}
 
@@ -237,11 +258,16 @@ async def stop_agent():
 @app.post("/agent/restart", tags=["Agent Control"])
 async def restart_agent():
     """Restart the chaos agent loop."""
-    if agent_state["enabled"]:
+    if agent_state.enabled:
         await stop_agent()
         time.sleep(1)
 
     return await start_agent()
+
+
+# ============================================================================
+# Manual Injections
+# ============================================================================
 
 
 @app.post("/inject/manual", tags=["Injections"])
@@ -253,10 +279,7 @@ async def manual_injection(
 
     This bypasses probability checks and injects immediately.
     """
-    if agent_state["config"] is None:
-        raise HTTPException(status_code=500, detail="Configuration not loaded")
-
-    config = agent_state["config"]
+    config = get_config()
     failure_type = request.failure_type.value
 
     if failure_type not in config.failures:
@@ -296,13 +319,15 @@ async def manual_injection(
     }
 
 
-@app.get("/config", tags=["Configuration"])
-async def get_config():
-    """Get current agent configuration."""
-    if agent_state["config"] is None:
-        raise HTTPException(status_code=500, detail="Configuration not loaded")
+# ============================================================================
+# Configuration Management
+# ============================================================================
 
-    config = agent_state["config"]
+
+@app.get("/config", tags=["Configuration"])
+async def get_config_endpoint():
+    """Get current agent configuration."""
+    config = get_config()
 
     return {
         "agent": {
@@ -320,10 +345,7 @@ async def get_config():
 )
 async def get_failure_config(failure_type: FailureType):
     """Get configuration for a specific failure type."""
-    if agent_state["config"] is None:
-        raise HTTPException(status_code=500, detail="Configuration not loaded")
-
-    config = agent_state["config"]
+    config = get_config()
     failure_name = failure_type.value
 
     if failure_name not in config.failures:
@@ -348,11 +370,8 @@ async def update_config(request: ConfigUpdateRequest):
 
     Changes take effect immediately if agent is running.
     """
-    if agent_state["config"] is None:
-        raise HTTPException(status_code=500, detail="Configuration not loaded")
-
-    config = agent_state["config"]
-    changes = {}
+    config = get_config()
+    changes: Dict[str, Any] = {}
 
     if request.interval_seconds is not None:
         config.agent.interval_seconds = request.interval_seconds
@@ -376,7 +395,7 @@ async def update_config(request: ConfigUpdateRequest):
         "changes": changes,
         "note": (
             "Changes take effect immediately"
-            if agent_state["enabled"]
+            if agent_state.enabled
             else "Changes will take effect when agent starts"
         ),
     }
@@ -387,10 +406,7 @@ async def update_failure_config(
     failure_type: FailureType, config_update: Dict[str, Any]
 ):
     """Update configuration for a specific failure type."""
-    if agent_state["config"] is None:
-        raise HTTPException(status_code=500, detail="Configuration not loaded")
-
-    config = agent_state["config"]
+    config = get_config()
     failure_name = failure_type.value
 
     if failure_name not in config.failures:
@@ -417,7 +433,7 @@ async def reload_config():
     """Reload configuration from config.yaml file."""
     try:
         config = load_config()
-        agent_state["config"] = config
+        agent_state.config = config
         logger.info("Configuration reloaded from file")
 
         return {
@@ -425,7 +441,7 @@ async def reload_config():
             "message": "Configuration reloaded successfully from config.yaml",
             "note": (
                 "Agent must be restarted for changes to take full effect"
-                if agent_state["enabled"]
+                if agent_state.enabled
                 else None
             ),
         }
@@ -434,6 +450,11 @@ async def reload_config():
         raise HTTPException(
             status_code=500, detail=f"Failed to reload config: {str(e)}"
         )
+
+
+# ============================================================================
+# Metrics & Monitoring
+# ============================================================================
 
 
 @app.get("/metrics/summary", tags=["Metrics"])

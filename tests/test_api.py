@@ -19,20 +19,20 @@ def client():
 @pytest.fixture(autouse=True)
 def reset_agent_state():
     """Reset agent state before each test."""
-    agent_state["enabled"] = False
-    agent_state["agent_thread"] = None
-    agent_state["stop_event"].clear()
+    agent_state.enabled = False
+    agent_state.agent_thread = None
+    agent_state.stop_event.clear()
     try:
-        agent_state["config"] = load_config()
+        agent_state.config = load_config()
     except Exception:
         pass
     yield
     # Cleanup after test
-    if agent_state["enabled"]:
-        agent_state["stop_event"].set()
-        if agent_state["agent_thread"]:
-            agent_state["agent_thread"].join(timeout=2)
-        agent_state["enabled"] = False
+    if agent_state.enabled:
+        agent_state.stop_event.set()
+        if agent_state.agent_thread:
+            agent_state.agent_thread.join(timeout=2)
+        agent_state.enabled = False
 
 
 class TestGeneralEndpoints:
