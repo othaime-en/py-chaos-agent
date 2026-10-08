@@ -9,11 +9,21 @@ from fastapi.testclient import TestClient
 from src.api import app, agent_state
 from src.config import load_config
 
+TEST_TOKEN = "t" * 40
+
+
+@pytest.fixture(autouse=True)
+def api_token(monkeypatch):
+    """Configure a valid API token for every API test."""
+    monkeypatch.setenv("CHAOS_API_TOKEN", TEST_TOKEN)
+    monkeypatch.delenv("CHAOS_API_TOKEN_FILE", raising=False)
+    monkeypatch.delenv("CHAOS_API_AUTH_DISABLED", raising=False)
+
 
 @pytest.fixture
 def client():
-    """Create test client."""
-    return TestClient(app)
+    """Create an authenticated test client."""
+    return TestClient(app, headers={"Authorization": f"Bearer {TEST_TOKEN}"})
 
 
 @pytest.fixture(autouse=True)

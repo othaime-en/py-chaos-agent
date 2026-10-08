@@ -4,16 +4,18 @@ FastAPI interface for Py-Chaos-Agent control.
 Provides programmatic control over chaos injections through REST API.
 """
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import Depends, FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any, List
 from enum import Enum
+import os
 import threading
 import time
 import random
 from datetime import datetime
 from contextlib import asynccontextmanager
 
+from .auth import auth_disabled, get_expected_token, require_auth
 from .config import Config, load_config
 from .failures.cpu import inject_cpu
 from .failures.memory import inject_memory
@@ -65,6 +67,15 @@ async def lifespan(app: FastAPI):
         logger.error(f"Failed to load config on startup: {e}")
         agent_state.config = None
 
+    # Surface auth misconfiguration immediately instead of on first request.
+    try:
+        if not auth_disabled() and get_expected_token() is None:
+            logger.error(
+                "No API token configured: all protected endpoints will return 503"
+            )
+    except ValueError as e:
+        logger.error(f"Invalid API token configuration: {e}")
+
     yield
 
     # Shutdown (optional cleanup)
@@ -73,11 +84,26 @@ async def lifespan(app: FastAPI):
         agent_state.stop_event.set()
 
 
+# Interactive docs expose the full API surface and are served outside the
+# app-level auth dependency, so they are off unless explicitly enabled.
+_docs_enabled = os.environ.get("CHAOS_API_ENABLE_DOCS", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+
 app = FastAPI(
     title="Py-Chaos-Agent API",
     description="REST API for controlling chaos engineering experiments",
     version="1.0.0",
     lifespan=lifespan,
+    # Secure by default: every route requires a bearer token except the
+    # liveness endpoints in src.auth.PUBLIC_PATHS.
+    dependencies=[Depends(require_auth)],
+    docs_url="/docs" if _docs_enabled else None,
+    redoc_url="/redoc" if _docs_enabled else None,
+    openapi_url="/openapi.json" if _docs_enabled else None,
 )
 
 
