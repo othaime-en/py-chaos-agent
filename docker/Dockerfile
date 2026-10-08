@@ -26,6 +26,9 @@ ENV JSON_LOGS=true
 # Expose API port (9000) and metrics port (8000)
 EXPOSE 9000 8000
 
-# Run API server by default
-# To run standalone agent instead: docker run <image> python -m src.agent
-CMD ["python", "-u", "-m", "src.api_server", "--host", "0.0.0.0", "--port", "9000"]
+# Run API server by default.
+# The server binds to 127.0.0.1 and requires an API token (CHAOS_API_TOKEN or
+# CHAOS_API_TOKEN_FILE). To make it reachable, set CHAOS_API_HOST=0.0.0.0 in
+# the runtime environment alongside the token; it refuses to start otherwise.
+# To run the standalone agent instead: docker run <image> python -m src.agent
+CMD ["python", "-u", "-m", "src.api_server", "--port", "9000"]

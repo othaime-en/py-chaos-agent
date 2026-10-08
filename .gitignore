@@ -34,3 +34,6 @@ override.tf
 override.tf.json
 *.tfvars
 
+
+# Local secrets
+.env

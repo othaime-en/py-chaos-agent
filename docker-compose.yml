@@ -4,28 +4,47 @@ services:
       context: .
       dockerfile: docker/Dockerfile.target
     ports:
+      # Host-side bindings are loopback only. The chaos agent shares this
+      # container's network namespace, so its ports are published here.
       - "8080:8080"
-      - "8000:8000"
-      - "9000:9000"
+      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:9000:9000"
     restart: always
 
   chaos-agent:
     build:
       context: .
       dockerfile: docker/Dockerfile
-    privileged: true
     network_mode: "service:target-app"
     pid: "service:target-app"
+    # Least privilege: no `privileged: true`. NET_ADMIN is needed for `tc`
+    # latency injection, KILL for signalling the target process.
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_ADMIN
+      - KILL
+    security_opt:
+      - no-new-privileges:true
     volumes:
       - ./config.yaml:/app/config.yaml:ro
-      - ./logs:/var/log/chaos-agent
+      # Named volume: with all other capabilities dropped, root can no longer
+      # write into a host directory owned by another user.
+      - chaos-logs:/var/log/chaos-agent
     environment:
       - LOG_LEVEL=INFO
       - JSON_LOGS=true
       - LOG_FILE=/var/log/chaos-agent/agent.log
+      # Reachable through the published (loopback-only) host port above.
+      - CHAOS_API_HOST=0.0.0.0
+      # Required. Compose refuses to start without it. See .env.example.
+      - CHAOS_API_TOKEN=${CHAOS_API_TOKEN:?Set CHAOS_API_TOKEN, e.g. openssl rand -hex 32}
     healthcheck:
       test: [ "CMD-SHELL", "curl -f http://localhost:9000/health || exit 1" ]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 10s
+
+volumes:
+  chaos-logs:
