@@ -25,6 +25,9 @@ A Python-based chaos engineering sidecar tool for testing the resilience of cont
 git clone https://github.com/othaime-en/py-chaos-agent.git
 cd py-chaos-agent
 
+# Set the API token (required; the control API will not start without one)
+echo "CHAOS_API_TOKEN=$(openssl rand -hex 32)" > .env
+
 # Start the target application and chaos agent
 docker-compose up --build
 
@@ -45,8 +48,10 @@ curl http://localhost:8080
 docker build -t py-chaos-agent:latest -f docker/Dockerfile .
 docker build -t target-app:latest -f docker/Dockerfile.target .
 
-# Deploy to Kubernetes
+# Deploy to Kubernetes (the pod needs the API token Secret to start)
 kubectl apply -f k8s/chaos-demo.yaml
+kubectl -n chaos-demo create secret generic chaos-api-token \
+  --from-literal=token="$(openssl rand -hex 32)"
 
 # View chaos agent logs
 kubectl logs -n chaos-demo -l app=resilient-app -c chaos-agent -f
@@ -110,6 +115,17 @@ Py-Chaos-Agent runs as a sidecar container in Kubernetes, sharing the process an
 ```
 
 See [Architecture Documentation](docs/architecture.md) for detailed design.
+
+## API Security
+
+The control API requires a bearer token on every endpoint except `/health`,
+binds to `127.0.0.1` by default, and refuses to start without a token.
+Containers run with `NET_ADMIN` and `KILL` only, not `privileged`.
+See [API Security](docs/user-guide/api-security.md).
+
+```bash
+curl -H "Authorization: Bearer $CHAOS_API_TOKEN" http://127.0.0.1:9000/status
+```
 
 ## Safety and Ethics
 

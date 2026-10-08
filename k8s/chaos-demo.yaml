@@ -71,9 +71,18 @@ spec:
               subPath: config.yaml
             - name: logs
               mountPath: /var/log/chaos-agent
+            - name: api-token
+              mountPath: /var/run/secrets/chaos-api
+              readOnly: true
           securityContext:
+            allowPrivilegeEscalation: false
+            seccompProfile:
+              type: RuntimeDefault
             capabilities:
-              add: ["NET_ADMIN"] # Required for tc
+              drop: ["ALL"]
+              add:
+                - NET_ADMIN # tc netem latency injection
+                - KILL # signal the target container's process
           ports:
             - containerPort: 8000 # metrics
               name: metrics
@@ -86,6 +95,13 @@ spec:
               value: "true"
             - name: LOG_FILE
               value: "/var/log/chaos-agent/agent.log"
+            # Probes reach the API on the pod IP, so it must listen beyond
+            # loopback. This is safe only because a token is mandatory: the
+            # server refuses to start without one.
+            - name: CHAOS_API_HOST
+              value: "0.0.0.0"
+            - name: CHAOS_API_TOKEN_FILE
+              value: /var/run/secrets/chaos-api/token
             - name: HOSTNAME
               valueFrom:
                 fieldRef:
@@ -109,6 +125,13 @@ spec:
             name: chaos-config
         - name: logs
           emptyDir: {}
+        # Create before applying (pod will not start without it):
+        #   kubectl -n chaos-demo create secret generic chaos-api-token \
+        #     --from-literal=token="$(openssl rand -hex 32)"
+        - name: api-token
+          secret:
+            secretName: chaos-api-token
+            defaultMode: 0400
 ---
 apiVersion: v1
 kind: Service
@@ -133,11 +156,9 @@ metadata:
 spec:
   selector:
     app: resilient-app
+  # The control API (9000) is intentionally not exposed through this Service.
+  # Reach it with: kubectl -n chaos-demo port-forward deploy/resilient-app 9000:9000
   ports:
-    - name: api
-      port: 9000
-      targetPort: 9000
-      protocol: TCP
     - name: metrics
       port: 8000
       targetPort: 8000

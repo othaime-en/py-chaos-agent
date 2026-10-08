@@ -4,13 +4,17 @@ Standalone API server for Py-Chaos-Agent.
 Run this to start the FastAPI server:
     python -m src.api_server
 
-Or with custom host/port:
-    python -m src.api_server --host 0.0.0.0 --port 9000
+Binds to 127.0.0.1 by default and requires an API token (see src/auth.py).
+To listen on other interfaces, set a token and opt in explicitly:
+    CHAOS_API_TOKEN=$(openssl rand -hex 32) \
+        python -m src.api_server --host 0.0.0.0 --port 9000
 """
 
 import uvicorn
 import argparse
+import os
 import sys
+from . import auth
 from .logging_config import setup_logging, get_logger
 from .metrics import start_metrics_server
 
@@ -21,8 +25,12 @@ def main():
     parser = argparse.ArgumentParser(description="Py-Chaos-Agent API Server")
     parser.add_argument(
         "--host",
-        default="0.0.0.0",
-        help="Host to bind the API server (default: 0.0.0.0)",
+        default=os.environ.get("CHAOS_API_HOST", "127.0.0.1"),
+        help=(
+            "Host to bind the API server. Default: 127.0.0.1, or the "
+            "CHAOS_API_HOST environment variable. Binding to a non-loopback "
+            "address requires an API token."
+        ),
     )
     parser.add_argument(
         "--port",
@@ -48,6 +56,15 @@ def main():
         help="Logging level (default: INFO)",
     )
 
+    parser.add_argument(
+        "--insecure-no-auth",
+        action="store_true",
+        help=(
+            "Disable API authentication. Only allowed when bound to a "
+            "loopback address. For local development only."
+        ),
+    )
+
     args = parser.parse_args()
 
     # Setup logging
@@ -58,6 +75,12 @@ def main():
         "file": {"enabled": False},
     }
     setup_logging(logging_config)
+
+    # Refuse unsafe configurations before opening any ports.
+    auth.validate_startup(args.host, args.insecure_no_auth)
+    if args.insecure_no_auth:
+        # Propagate to the app (also covers uvicorn --reload subprocesses).
+        os.environ[auth.AUTH_DISABLED_ENV] = "true"
 
     logger.info(
         "Starting Py-Chaos-Agent API Server",
