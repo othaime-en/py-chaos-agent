@@ -14,6 +14,55 @@ failures:
   # Individual failure type configurations
 ```
 
+## Validation and Limits
+
+Every value is validated before it is used, whether it comes from `config.yaml`,
+`PATCH /config`, `PATCH /config/failures/{type}`, or `POST /inject/manual`.
+A bad value is rejected with a clear message; nothing is injected and nothing is
+half-applied.
+
+Rules:
+
+- **Unknown keys are errors.** A typo such as `duraton_seconds` fails instead of
+  silently using a default. This also applies to unknown failure types and
+  unknown top-level sections.
+- **Types are strict.** `"10"` is not an integer, `10.0` is not an integer, and
+  `true` is not a number.
+- **Defaults are filled in** (`enabled: false`, `probability: 0`, `cores: 1`,
+  `mb: 100`, `interface: eth0`, `delay_ms: 100`), so a missing optional key never
+  causes an error mid-injection. `duration_seconds` is required for `cpu`,
+  `memory`, and `network`.
+- **Partial updates are merged, then validated as a whole.** Enabling `process`
+  without a `target_name` is rejected even if the request itself looks fine.
+- **API errors return 422** with a list of `{"loc": [...], "msg": "..."}`.
+
+Hard limits (defined in `src/limits.py`):
+
+| Setting | Min | Max |
+| --- | --- | --- |
+| `agent.interval_seconds` | 1 | 3600 |
+| `probability` | 0 | 1 |
+| `duration_seconds` | 1 | 300 |
+| `cpu.cores` | 1 | 16 |
+| `memory.mb` | 1 | 2048 |
+| `network.delay_ms` | 1 | 10000 |
+| `network.interface` | 1 to 15 characters: letters, digits, `. _ : -` | |
+| `process.target_name` | 3 to 128 characters: letters, digits, `. _ @ + : -`; broad names like `python` are refused | |
+
+The injectors also enforce the upper limits themselves, so code that bypasses
+config loading and the API still cannot start unbounded load.
+
+These ceilings are fixed constants for now. Making CPU and memory limits relative
+to the container's cgroup limits is planned as a follow-up.
+
+Example error:
+
+```text
+Invalid configuration:
+  failures.cpu.cores: Input should be less than or equal to 16
+  failures.network.interface: String should match pattern '^[A-Za-z0-9._:-]{1,15}$'
+```
+
 ## Agent Configuration
 
 ### `agent.interval_seconds`
