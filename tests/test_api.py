@@ -278,3 +278,199 @@ class TestIntegration:
         # 6. Verify stopped
         final_status = client.get("/status")
         assert final_status.json()["enabled"] is False
+
+
+class TestInputValidation:
+    """The API rejects out-of-bounds or malformed input and never half-applies it."""
+
+    def _failures(self):
+        return {k: dict(v) for k, v in agent_state.config.failures.items()}
+
+    # --- /inject/manual ---------------------------------------------------
+
+    def test_manual_injection_rejects_unbounded_cores(self, client, monkeypatch):
+        called = []
+        monkeypatch.setattr("src.api.inject_cpu", lambda *a, **k: called.append(a))
+        response = client.post(
+            "/inject/manual",
+            json={"failure_type": "cpu", "config": {"cores": 100000}},
+        )
+        assert response.status_code == 422
+        assert response.json()["detail"][0]["loc"] == ["cpu", "cores"]
+        assert called == []
+
+    @pytest.mark.parametrize(
+        "failure,override",
+        [
+            ("cpu", {"duration_seconds": 10**9}),
+            ("memory", {"mb": 10**6}),
+            ("network", {"delay_ms": 10**6}),
+            ("network", {"interface": "eth0; rm -rf /"}),
+            ("process", {"target_name": "python"}),
+        ],
+    )
+    def test_manual_injection_rejects_dangerous_overrides(
+        self, client, failure, override
+    ):
+        response = client.post(
+            "/inject/manual", json={"failure_type": failure, "config": override}
+        )
+        assert response.status_code == 422
+
+    def test_manual_injection_merges_partial_override(self, client, monkeypatch):
+        seen = []
+        monkeypatch.setattr(
+            "src.api.inject_cpu", lambda cfg, dry_run=False: seen.append(cfg)
+        )
+        response = client.post(
+            "/inject/manual",
+            json={
+                "failure_type": "cpu",
+                "dry_run": True,
+                "config": {"duration_seconds": 3},
+            },
+        )
+        assert response.status_code == 200
+        assert seen[0]["duration_seconds"] == 3
+        # Untouched keys come from the stored config, not KeyError
+        assert "cores" in seen[0]
+
+    def test_manual_injection_rejects_unknown_field(self, client):
+        response = client.post(
+            "/inject/manual", json={"failure_type": "cpu", "bogus": 1}
+        )
+        assert response.status_code == 422
+
+    # --- PATCH /config ----------------------------------------------------
+
+    @pytest.mark.parametrize("value", [0, -1, 3601, "10", 1.5])
+    def test_patch_interval_bounds(self, client, value):
+        before = agent_state.config.agent.interval_seconds
+        response = client.patch("/config", json={"interval_seconds": value})
+        assert response.status_code == 422
+        assert agent_state.config.agent.interval_seconds == before
+
+    @pytest.mark.parametrize(
+        "update",
+        [
+            {"probability": 5},
+            {"probability": -0.1},
+            {"cores": 0},
+            {"cores": 1000},
+            {"duration_seconds": 0},
+            {"duration_seconds": 100000},
+            {"unknown_key": 1},
+            {"enabled": "yes"},
+        ],
+    )
+    def test_patch_failure_rejects_invalid(self, client, update):
+        before = self._failures()
+        response = client.patch("/config", json={"failures": {"cpu": update}})
+        assert response.status_code == 422
+        assert self._failures() == before
+
+    def test_patch_is_atomic(self, client):
+        """A valid change bundled with an invalid one applies neither."""
+        before_interval = agent_state.config.agent.interval_seconds
+        before = self._failures()
+        response = client.patch(
+            "/config",
+            json={
+                "interval_seconds": before_interval + 1,
+                "failures": {
+                    "memory": {"mb": 64},
+                    "cpu": {"cores": 99999},
+                },
+            },
+        )
+        assert response.status_code == 422
+        assert agent_state.config.agent.interval_seconds == before_interval
+        assert self._failures() == before
+
+    def test_patch_reports_every_error(self, client):
+        response = client.patch(
+            "/config",
+            json={"failures": {"cpu": {"cores": 0}, "memory": {"mb": 0}}},
+        )
+        locs = {tuple(e["loc"]) for e in response.json()["detail"]}
+        assert ("cpu", "cores") in locs
+        assert ("memory", "mb") in locs
+
+    def test_patch_unknown_failure_type_rejected(self, client):
+        response = client.patch("/config", json={"failures": {"disk": {"x": 1}}})
+        assert response.status_code == 422
+
+    def test_patch_unconfigured_failure_type_is_404(self, client):
+        agent_state.config.failures.pop("memory")
+        response = client.patch("/config", json={"failures": {"memory": {"mb": 5}}})
+        assert response.status_code == 404
+
+    def test_patch_unknown_top_level_field_rejected(self, client):
+        assert client.patch("/config", json={"nope": 1}).status_code == 422
+
+    def test_patch_valid_update_applies(self, client):
+        response = client.patch(
+            "/config",
+            json={
+                "interval_seconds": 7,
+                "dry_run": True,
+                "failures": {"cpu": {"cores": 3, "probability": 0.9}},
+            },
+        )
+        assert response.status_code == 200
+        assert agent_state.config.agent.interval_seconds == 7
+        assert agent_state.config.agent.dry_run is True
+        assert agent_state.config.failures["cpu"]["cores"] == 3
+        assert agent_state.config.failures["cpu"]["probability"] == 0.9
+        # Untouched keys survive the merge
+        assert "duration_seconds" in agent_state.config.failures["cpu"]
+
+    def test_patch_cannot_enable_process_without_target(self, client):
+        agent_state.config.failures["process"]["target_name"] = None
+        agent_state.config.failures["process"]["enabled"] = False
+        response = client.patch(
+            "/config", json={"failures": {"process": {"enabled": True}}}
+        )
+        assert response.status_code == 422
+        assert agent_state.config.failures["process"]["enabled"] is False
+
+    def test_patch_cannot_target_broad_process(self, client):
+        response = client.patch(
+            "/config/failures/process", json={"target_name": "systemd"}
+        )
+        assert response.status_code == 422
+
+    # --- PATCH /config/failures/{type} -----------------------------------
+
+    def test_patch_single_failure_rejects_invalid(self, client):
+        before = self._failures()
+        response = client.patch("/config/failures/memory", json={"mb": 10**7})
+        assert response.status_code == 422
+        assert self._failures() == before
+
+    def test_patch_single_failure_applies_valid(self, client):
+        response = client.patch("/config/failures/memory", json={"mb": 256})
+        assert response.status_code == 200
+        assert agent_state.config.failures["memory"]["mb"] == 256
+
+    def test_patch_single_failure_rejects_unknown_key(self, client):
+        response = client.patch("/config/failures/memory", json={"mbb": 256})
+        assert response.status_code == 422
+
+    # --- reload -----------------------------------------------------------
+
+    def test_reload_rejects_invalid_file_and_keeps_old_config(
+        self, client, monkeypatch
+    ):
+        from src.schemas import ConfigValidationError
+
+        def boom(*a, **k):
+            raise ConfigValidationError(
+                [{"loc": ["failures", "cpu", "cores"], "msg": "too big"}]
+            )
+
+        monkeypatch.setattr("src.api.load_config", boom)
+        previous = agent_state.config
+        response = client.post("/config/reload")
+        assert response.status_code == 422
+        assert agent_state.config is previous

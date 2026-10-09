@@ -1,5 +1,6 @@
 import multiprocessing
 import time
+from ..limits import MAX_CORES, MAX_DURATION_SECONDS, within_upper_bound
 from ..metrics import INJECTIONS_TOTAL, INJECTION_ACTIVE
 from ..logging_config import get_logger
 
@@ -83,6 +84,24 @@ def inject_cpu(config: dict, dry_run: bool = False):
     """
     cores = config.get("cores", 1)
     duration = config["duration_seconds"]
+
+    # Last line of defense: config and API writes are validated upstream, but
+    # a direct caller must not be able to spawn an unbounded number of workers.
+    if not within_upper_bound(cores, MAX_CORES) or not within_upper_bound(
+        duration, MAX_DURATION_SECONDS
+    ):
+        logger.error(
+            "CPU injection rejected - parameters exceed hard limits",
+            extra={
+                "cores": cores,
+                "duration_seconds": duration,
+                "max_cores": MAX_CORES,
+                "max_duration_seconds": MAX_DURATION_SECONDS,
+                "status": "failed",
+            },
+        )
+        INJECTIONS_TOTAL.labels(failure_type="cpu", status="failed").inc()
+        return
 
     if dry_run:
         logger.info(
