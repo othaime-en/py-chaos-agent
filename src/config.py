@@ -1,12 +1,15 @@
 """
 Configuration loading and validation for Py-Chaos-Agent.
 
-Loads configuration from config.yaml and provides typed access to settings.
+Loads configuration from config.yaml, validates it against the schemas in
+``src.schemas`` (types, ranges, unknown keys), and provides typed access.
 """
 
 import yaml
 from pathlib import Path
 from typing import Any, Dict
+
+from .schemas import validate_config_dict
 
 
 class AgentConfig:
@@ -54,6 +57,8 @@ def load_config(config_path: str = "config.yaml") -> Config:
         FileNotFoundError: If config file doesn't exist
         yaml.YAMLError: If config file is invalid YAML
         ValueError: If required configuration is missing
+        ConfigValidationError: (a ValueError) listing every invalid value,
+            out-of-range number, wrong type, or unknown key
     """
     config_file = Path(config_path)
 
@@ -81,7 +86,9 @@ def load_config(config_path: str = "config.yaml") -> Config:
     if "failures" not in config_dict:
         raise ValueError("Missing required 'failures' section in config.yaml")
 
-    return Config(config_dict)
+    # Validate types, ranges and unknown keys; returns a normalized dict with
+    # defaults filled in so downstream code never hits a KeyError.
+    return Config(validate_config_dict(config_dict))
 
 
 def validate_config(config: Config) -> list[str]:
@@ -94,18 +101,22 @@ def validate_config(config: Config) -> list[str]:
     Returns:
         List of warning messages (empty if no warnings)
     """
-    warnings = []
+    warnings: list[str] = []
 
     # Check agent config
-    if config.agent.interval_seconds < 1:
-        warnings.append(
-            "interval_seconds is less than 1 second, which may cause high CPU usage"
-        )
+    interval = config.agent.interval_seconds
+    if not isinstance(interval, (int, float)):
+        warnings.append(f"interval_seconds is not a number: {interval!r}")
+    else:
+        if interval < 1:
+            warnings.append(
+                "interval_seconds is less than 1 second, which may cause high CPU usage"
+            )
 
-    if config.agent.interval_seconds > 300:
-        warnings.append(
-            "interval_seconds is greater than 5 minutes, chaos may be infrequent"
-        )
+        if interval > 300:
+            warnings.append(
+                "interval_seconds is greater than 5 minutes, chaos may be infrequent"
+            )
 
     # Check failure configs
     for name, failure_config in config.failures.items():
@@ -115,6 +126,9 @@ def validate_config(config: Config) -> list[str]:
 
         # Check probability
         prob = failure_config.get("probability", 0)
+        if isinstance(prob, bool) or not isinstance(prob, (int, float)):
+            warnings.append(f"Failure '{name}' probability {prob!r} is not a number")
+            continue
         if not 0 <= prob <= 1:
             warnings.append(
                 f"Failure '{name}' probability {prob} is outside range [0, 1]"
@@ -126,7 +140,7 @@ def validate_config(config: Config) -> list[str]:
 
         # Specific validation for process killing
         if name == "process" and failure_config.get("enabled", False):
-            target_name = failure_config.get("target_name", "").lower()
+            target_name = str(failure_config.get("target_name") or "").lower()
             if not target_name:
                 warnings.append(
                     "Process killing is enabled but no target_name specified"
@@ -147,7 +161,7 @@ def validate_config(config: Config) -> list[str]:
     # Check logging config
     logging_config = config.get_logging_config()
     if logging_config:
-        log_level = logging_config.get("level", "INFO").upper()
+        log_level = str(logging_config.get("level", "INFO")).upper()
         valid_levels = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
         if log_level not in valid_levels:
             warnings.append(
@@ -155,7 +169,7 @@ def validate_config(config: Config) -> list[str]:
                 f"Must be one of: {', '.join(valid_levels)}"
             )
 
-        log_format = logging_config.get("format", "text").lower()
+        log_format = str(logging_config.get("format", "text")).lower()
         if log_format not in ["text", "json"]:
             warnings.append(
                 f"Invalid log format '{log_format}'. Must be 'text' or 'json'"

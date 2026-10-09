@@ -5,7 +5,7 @@ import signal
 import sys
 import uuid
 import logging
-from .config import load_config
+from .config import load_config, validate_config
 from .metrics import start_metrics_server
 from .failures.network import cleanup_network_rules
 from .logging_config import (
@@ -76,6 +76,9 @@ def main():
     logger = get_logger(__name__)
 
     logger.info("Py-Chaos-Agent starting", extra={"version": "1.0.0"})
+
+    for warning in validate_config(config):
+        logger.warning("Configuration warning", extra={"warning": warning})
     logger.info(
         "Configuration loaded successfully",
         extra={
