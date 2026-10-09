@@ -5,7 +5,7 @@ Provides programmatic control over chaos injections through REST API.
 """
 
 from fastapi import Depends, FastAPI, HTTPException, BackgroundTasks
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from typing import Optional, Dict, Any, List
 from enum import Enum
 import os
@@ -16,7 +16,12 @@ from datetime import datetime
 from contextlib import asynccontextmanager
 
 from .auth import auth_disabled, get_expected_token, require_auth
-from .config import Config, load_config
+from . import limits
+from .config import Config, load_config, validate_config
+from .schemas import (
+    ConfigValidationError,
+    merge_failure_config,
+)
 from .failures.cpu import inject_cpu
 from .failures.memory import inject_memory
 from .failures.process import inject_process
@@ -55,6 +60,15 @@ def get_config() -> Config:
     return agent_state.config
 
 
+def _validation_error(exc: ConfigValidationError) -> HTTPException:
+    """
+    Turn a ConfigValidationError into a 422 using FastAPI's own error shape
+    (a list of {loc, msg}), so clients parse one format for all validation
+    failures. Pydantic's raw ``input`` field is not included.
+    """
+    return HTTPException(status_code=422, detail=exc.errors)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan event handler for startup and shutdown."""
@@ -63,6 +77,8 @@ async def lifespan(app: FastAPI):
         config = load_config()
         agent_state.config = config
         logger.info("API started, configuration loaded")
+        for warning in validate_config(config):
+            logger.warning("Configuration warning", extra={"warning": warning})
     except Exception as e:
         logger.error(f"Failed to load config on startup: {e}")
         agent_state.config = None
@@ -124,15 +140,34 @@ class AgentStatus(BaseModel):
 
 
 class ManualInjectionRequest(BaseModel):
+    """
+    ``config`` overrides are merged onto the stored config for that failure
+    type and the merged result is validated, so a partial override such as
+    ``{"duration_seconds": 3}`` is enough.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
     failure_type: FailureType
-    dry_run: bool = False
+    dry_run: bool = Field(False, strict=True)
     config: Optional[Dict[str, Any]] = None
 
 
 class ConfigUpdateRequest(BaseModel):
-    interval_seconds: Optional[int] = Field(None, ge=1, le=300)
-    dry_run: Optional[bool] = None
-    failures: Optional[Dict[str, Dict[str, Any]]] = None
+    """Partial update. Unknown fields and unknown failure types are rejected."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # strict=True: same rules as the config file, so "10" and 1.0 are rejected
+    # rather than silently coerced.
+    interval_seconds: Optional[int] = Field(
+        None,
+        strict=True,
+        ge=limits.MIN_INTERVAL_SECONDS,
+        le=limits.MAX_INTERVAL_SECONDS,
+    )
+    dry_run: Optional[bool] = Field(None, strict=True)
+    failures: Optional[Dict[FailureType, Dict[str, Any]]] = None
 
 
 class FailureConfigResponse(BaseModel):
@@ -427,8 +462,14 @@ async def manual_injection(
             status_code=404, detail=f"Failure type '{failure_type}' not found"
         )
 
-    # Use provided config or fall back to loaded config
-    failure_config = request.config if request.config else config.failures[failure_type]
+    # Overlay any overrides on the stored config and validate the result.
+    # Nothing is injected unless the merged config is within hard limits.
+    try:
+        failure_config = merge_failure_config(
+            failure_type, config.failures[failure_type], request.config or {}
+        )
+    except ConfigValidationError as e:
+        raise _validation_error(e)
 
     logger.info(
         f"Manual injection requested: {failure_type}",
@@ -513,6 +554,29 @@ async def update_config(request: ConfigUpdateRequest):
     config = get_config()
     changes: Dict[str, Any] = {}
 
+    # Phase 1: validate everything. Nothing is mutated until all of it passes,
+    # so a bad request can never leave the config half-applied.
+    validated_failures: Dict[str, Dict[str, Any]] = {}
+    errors: List[Dict[str, Any]] = []
+
+    for failure_type, updates in (request.failures or {}).items():
+        name = failure_type.value
+        if name not in config.failures:
+            raise HTTPException(
+                status_code=404, detail=f"Failure type '{name}' not found"
+            )
+        try:
+            validated_failures[name] = merge_failure_config(
+                name, config.failures[name], updates
+            )
+        except ConfigValidationError as e:
+            errors.extend(e.errors)
+
+    if errors:
+        raise _validation_error(ConfigValidationError(errors))
+
+    # Phase 2: apply. Each failure dict is replaced whole (never edited in
+    # place) so the running loop always sees a complete, valid config.
     if request.interval_seconds is not None:
         config.agent.interval_seconds = request.interval_seconds
         changes["interval_seconds"] = request.interval_seconds
@@ -521,11 +585,9 @@ async def update_config(request: ConfigUpdateRequest):
         config.agent.dry_run = request.dry_run
         changes["dry_run"] = request.dry_run
 
-    if request.failures is not None:
-        for failure_type, failure_config in request.failures.items():
-            if failure_type in config.failures:
-                config.failures[failure_type].update(failure_config)
-                changes[f"failures.{failure_type}"] = failure_config
+    for name, new_config in validated_failures.items():
+        config.failures[name] = new_config
+        changes[f"failures.{name}"] = new_config
 
     logger.info("Configuration updated via API", extra={"changes": changes})
 
@@ -554,7 +616,16 @@ async def update_failure_config(
             status_code=404, detail=f"Failure type '{failure_name}' not found"
         )
 
-    config.failures[failure_name].update(config_update)
+    try:
+        validated = merge_failure_config(
+            failure_name, config.failures[failure_name], config_update
+        )
+    except ConfigValidationError as e:
+        raise _validation_error(e)
+
+    # Replace whole (never edit in place) so the running loop never sees a
+    # partially updated config.
+    config.failures[failure_name] = validated
 
     logger.info(
         f"Updated {failure_name} configuration",
@@ -585,6 +656,10 @@ async def reload_config():
                 else None
             ),
         }
+    except ConfigValidationError as e:
+        # The previous (valid) config stays active.
+        logger.error(f"Rejected invalid config on reload: {e}")
+        raise _validation_error(e)
     except Exception as e:
         logger.error(f"Failed to reload config: {e}")
         raise HTTPException(
