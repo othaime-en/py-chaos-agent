@@ -2,6 +2,7 @@ import subprocess
 import time
 from typing import Tuple, Optional
 import re
+from ..limits import MAX_DURATION_SECONDS, within_upper_bound
 from ..metrics import INJECTIONS_TOTAL, INJECTION_ACTIVE
 from ..logging_config import get_logger
 
@@ -289,6 +290,18 @@ def inject_network(config: dict, dry_run: bool = False):
         logger.error(
             "Network injection failed - delay validation",
             extra={"delay_ms": delay_ms, "error": error, "status": "failed"},
+        )
+        INJECTIONS_TOTAL.labels(failure_type="network", status="failed").inc()
+        return
+
+    if not within_upper_bound(duration, MAX_DURATION_SECONDS):
+        logger.error(
+            "Network injection failed - duration exceeds hard limit",
+            extra={
+                "duration_seconds": duration,
+                "max_duration_seconds": MAX_DURATION_SECONDS,
+                "status": "failed",
+            },
         )
         INJECTIONS_TOTAL.labels(failure_type="network", status="failed").inc()
         return

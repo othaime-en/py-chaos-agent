@@ -1,5 +1,6 @@
 import time
 import threading
+from ..limits import MAX_DURATION_SECONDS, MAX_MEMORY_MB, within_upper_bound
 from ..metrics import INJECTIONS_TOTAL, INJECTION_ACTIVE
 from ..logging_config import get_logger
 
@@ -88,6 +89,23 @@ def _hold_memory(mb, duration):
 def inject_memory(config: dict, dry_run: bool = False):
     mb = config.get("mb", 100)
     duration = config["duration_seconds"]
+
+    # Last line of defense against unbounded allocation (see inject_cpu).
+    if not within_upper_bound(mb, MAX_MEMORY_MB) or not within_upper_bound(
+        duration, MAX_DURATION_SECONDS
+    ):
+        logger.error(
+            "Memory injection rejected - parameters exceed hard limits",
+            extra={
+                "mb": mb,
+                "duration_seconds": duration,
+                "max_mb": MAX_MEMORY_MB,
+                "max_duration_seconds": MAX_DURATION_SECONDS,
+                "status": "failed",
+            },
+        )
+        INJECTIONS_TOTAL.labels(failure_type="memory", status="failed").inc()
+        return
 
     if dry_run:
         logger.info(
