@@ -13,12 +13,30 @@ To listen on other interfaces, set a token and opt in explicitly:
 import uvicorn
 import argparse
 import os
+import signal
 import sys
 from . import auth
+from .lifecycle import lifecycle
 from .logging_config import setup_logging, get_logger
 from .metrics import start_metrics_server
 
 logger = get_logger(__name__)
+
+
+class ChaosServer(uvicorn.Server):
+    """
+    uvicorn server that cleans up the moment a shutdown signal arrives.
+
+    uvicorn's graceful shutdown waits for running background tasks, and an
+    injection can run for minutes. Without this, a SIGTERM during an injection
+    would wait out the injection, and Kubernetes would SIGKILL the pod after its
+    grace period with the tc rule still applied. Here the signal first wakes
+    every injection and removes its effect, then uvicorn proceeds as usual.
+    """
+
+    def handle_exit(self, sig, frame):
+        lifecycle.shutdown(f"signal {signal.Signals(sig).name}")
+        super().handle_exit(sig, frame)
 
 
 def main():
@@ -99,14 +117,30 @@ def main():
         logger.error(f"Failed to start metrics server: {e}")
         sys.exit(1)
 
+    # Backstop: run cleanups at interpreter exit even if no signal handler ran.
+    lifecycle.install_atexit()
+
     # Start API server
-    uvicorn.run(
-        "src.api:app",
-        host=args.host,
-        port=args.port,
-        reload=args.reload,
-        log_level=args.log_level.lower(),
-    )
+    if args.reload:
+        # Development only: uvicorn's reloader supervises a child process and
+        # bypasses ChaosServer. The API lifespan and atexit still run cleanups.
+        uvicorn.run(
+            "src.api:app",
+            host=args.host,
+            port=args.port,
+            reload=True,
+            log_level=args.log_level.lower(),
+        )
+    else:
+        server = ChaosServer(
+            uvicorn.Config(
+                "src.api:app",
+                host=args.host,
+                port=args.port,
+                log_level=args.log_level.lower(),
+            )
+        )
+        server.run()
 
 
 if __name__ == "__main__":

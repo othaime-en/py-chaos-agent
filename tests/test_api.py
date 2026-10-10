@@ -613,3 +613,111 @@ class TestResourceBudgetApi:
         assert client.post("/config/reload").status_code == 200
         assert governor.settings.cpu_fraction == 0.25
         assert governor.settings.require_cgroup_limits is True
+
+
+class TestInjectionLifecycleApi:
+    """Overlap refusal, abort, stop, kill switch, and shutdown behavior."""
+
+    def test_abort_requires_auth(self):
+        assert TestClient(app).post("/inject/abort").status_code == 401
+
+    def test_abort_reports_how_many_were_running(self, client):
+        from src.lifecycle import lifecycle
+
+        ticket, _ = lifecycle.begin("network")
+        lifecycle.begin("cpu")
+        body = client.post("/inject/abort").json()
+        assert body == {"status": "aborted", "aborted": 2}
+        assert ticket.interrupted
+
+    def test_abort_with_nothing_running(self, client):
+        assert client.post("/inject/abort").json()["aborted"] == 0
+
+    def test_status_lists_active_injections(self, client):
+        from src.lifecycle import lifecycle
+
+        assert client.get("/status").json()["active_injections"] == []
+        lifecycle.begin("network")
+        assert client.get("/status").json()["active_injections"] == ["network"]
+
+    def test_manual_injection_is_409_while_same_type_runs(self, client, monkeypatch):
+        from src.lifecycle import lifecycle
+
+        called = []
+        monkeypatch.setattr("src.api.inject_network", lambda *a, **k: called.append(1))
+        lifecycle.begin("network")
+        response = client.post("/inject/manual", json={"failure_type": "network"})
+        assert response.status_code == 409
+        assert "already running" in response.json()["detail"]
+        assert called == []
+
+    def test_other_types_are_not_blocked(self, client, monkeypatch):
+        from src.lifecycle import lifecycle
+
+        monkeypatch.setattr("src.api.inject_cpu", lambda *a, **k: None)
+        lifecycle.begin("network")
+        response = client.post("/inject/manual", json={"failure_type": "cpu"})
+        assert response.status_code == 200
+
+    def test_dry_run_is_not_blocked(self, client, monkeypatch):
+        from src.lifecycle import lifecycle
+
+        monkeypatch.setattr("src.api.inject_network", lambda *a, **k: None)
+        lifecycle.begin("network")
+        response = client.post(
+            "/inject/manual", json={"failure_type": "network", "dry_run": True}
+        )
+        assert response.status_code == 200
+
+    def test_manual_injection_is_503_while_shutting_down(self, client):
+        from src.lifecycle import lifecycle
+
+        lifecycle.shutdown("test")
+        response = client.post("/inject/manual", json={"failure_type": "cpu"})
+        assert response.status_code == 503
+
+    def test_stop_aborts_in_flight_injections(self, client):
+        from src.lifecycle import lifecycle
+
+        assert client.post("/agent/start?enable_kill_switch=false").status_code == 200
+        ticket, _ = lifecycle.begin("network")
+        assert client.post("/agent/stop").status_code == 200
+        assert ticket.interrupted
+
+    def test_kill_switch_trip_aborts_in_flight_injections(self, client, monkeypatch):
+        from src.lifecycle import lifecycle
+
+        captured = {}
+
+        def fake_start(self, callback):
+            captured["callback"] = callback
+
+        monkeypatch.setattr("src.api.KillSwitch.start_monitoring", fake_start)
+        assert client.post("/agent/start").status_code == 200
+        ticket, _ = lifecycle.begin("cpu")
+        captured["callback"]()
+        assert ticket.interrupted
+        assert agent_state.stop_event.is_set()
+
+    def test_lifespan_shutdown_aborts_and_cleans_up(self, monkeypatch):
+        from src.lifecycle import lifecycle
+
+        ran = []
+        monkeypatch.setattr(lifecycle, "run_cleanups", lambda: ran.append(1))
+        ticket, _ = lifecycle.begin("network")
+        with TestClient(app):
+            pass  # enter and leave: runs startup and shutdown
+        assert lifecycle.is_shutting_down()
+        assert ticket.interrupted
+        assert ran, "shutdown did not run the registered cleanups"
+
+    def test_startup_repairs_stale_rules_on_the_configured_interface(self, monkeypatch):
+        seen = []
+        monkeypatch.setattr(
+            "src.api.reconcile_stale_rules", lambda ifaces: seen.append(list(ifaces))
+        )
+        with TestClient(app):
+            pass
+        assert seen and seen[0] == [
+            agent_state.config.failures["network"].get("interface", "eth0")
+        ]

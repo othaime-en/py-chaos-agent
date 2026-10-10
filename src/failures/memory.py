@@ -1,5 +1,6 @@
 import time
 import threading
+from ..lifecycle import lifecycle
 from ..limits import MAX_DURATION_SECONDS, MAX_MEMORY_MB, within_upper_bound
 from ..metrics import INJECTIONS_TOTAL, INJECTION_ACTIVE
 from ..resources import governor
@@ -49,7 +50,11 @@ def _hold_memory(mb, duration):
         )
 
         logger.debug(f"Holding {mb} MB for {duration} seconds")
-        time.sleep(duration)
+        # Returns early on abort or shutdown; the finally below frees the memory.
+        if lifecycle.sleep(duration):
+            logger.warning(
+                "Memory injection cut short", extra={"reason": "abort or shutdown"}
+            )
 
         logger.info("Releasing allocated memory", extra={"mb": mb})
 
@@ -88,6 +93,28 @@ def _hold_memory(mb, duration):
 
 
 def inject_memory(config: dict, dry_run: bool = False):
+    """
+    Inject memory pressure. Only one memory injection runs at a time; a second
+    request is skipped (logged and counted) rather than stacked on the first.
+    The guard is held by the allocation thread and released when it finishes.
+    """
+    ticket = None
+    if not dry_run:
+        ticket = lifecycle.begin_or_skip("memory")
+        if ticket is None:
+            return
+
+    started = False
+    try:
+        started = _inject_memory(config, dry_run, ticket)
+    finally:
+        # If the thread took over, it releases the guard. Otherwise we do.
+        if ticket is not None and not started:
+            lifecycle.end(ticket)
+
+
+def _inject_memory(config: dict, dry_run: bool, ticket) -> bool:
+    """Returns True if an allocation thread was started (it owns the ticket)."""
     mb = config.get("mb", 100)
     duration = config["duration_seconds"]
 
@@ -106,7 +133,7 @@ def inject_memory(config: dict, dry_run: bool = False):
             },
         )
         INJECTIONS_TOTAL.labels(failure_type="memory", status="failed").inc()
-        return
+        return False
 
     # Refuse (not clamp) allocations that do not fit the container's real
     # memory headroom: a smaller allocation would silently run a different
@@ -118,7 +145,7 @@ def inject_memory(config: dict, dry_run: bool = False):
             extra={"mb": mb, "reason": grant.reason, "status": "failed"},
         )
         INJECTIONS_TOTAL.labels(failure_type="memory", status="failed").inc()
-        return
+        return False
 
     if dry_run:
         logger.info(
@@ -126,7 +153,7 @@ def inject_memory(config: dict, dry_run: bool = False):
             extra={"mb": mb, "duration_seconds": duration, "dry_run": True},
         )
         INJECTIONS_TOTAL.labels(failure_type="memory", status="skipped").inc()
-        return
+        return False
 
     # From here the memory is reserved; the thread's finally releases it.
 
@@ -143,7 +170,8 @@ def inject_memory(config: dict, dry_run: bool = False):
         logger.debug("Memory injection thread started", extra={"thread_id": thread_id})
 
         try:
-            _hold_memory(mb, duration)
+            with lifecycle.bound(ticket):
+                _hold_memory(mb, duration)
             INJECTIONS_TOTAL.labels(failure_type="memory", status="success").inc()
 
             logger.info(
@@ -189,6 +217,8 @@ def inject_memory(config: dict, dry_run: bool = False):
         finally:
             governor.release_memory(mb)
             INJECTION_ACTIVE.labels(failure_type="memory").set(0)
+            if ticket is not None:
+                lifecycle.end(ticket)
             logger.debug(
                 "Memory injection thread completing", extra={"thread_id": thread_id}
             )
@@ -209,3 +239,4 @@ def inject_memory(config: dict, dry_run: bool = False):
         "Memory injection thread spawned",
         extra={"thread_id": thread.ident, "thread_name": thread.name},
     )
+    return True

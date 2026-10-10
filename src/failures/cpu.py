@@ -1,5 +1,7 @@
 import multiprocessing
+import os
 import time
+from ..lifecycle import lifecycle
 from ..limits import MAX_CORES, MAX_DURATION_SECONDS, within_upper_bound
 from ..metrics import INJECTIONS_CLAMPED, INJECTIONS_TOTAL, INJECTION_ACTIVE
 from ..resources import governor
@@ -8,25 +10,55 @@ from ..logging_config import get_logger
 logger = get_logger(__name__)
 
 
-def _worker(duration: int):
-    """Worker process that consumes CPU for the specified duration."""
+def _worker(duration: int, parent_pid: int = 0):
+    """
+    Worker process that consumes CPU for the specified duration.
+
+    Exits early if its parent dies (SIGKILL, OOM kill), so a crashed agent
+    cannot leave workers burning CPU until the duration runs out.
+    """
     end = time.time() + duration
-    while time.time() < end:
-        pass  # spin
+    next_parent_check = 0.0
+    while True:
+        now = time.time()
+        if now >= end:
+            return
+        if parent_pid and now >= next_parent_check:
+            if os.getppid() != parent_pid:
+                return
+            next_parent_check = now + 0.2
+
+
+def _terminate(procs):
+    """Stop any worker still running. Safe to call repeatedly."""
+    for i, p in enumerate(procs):
+        if p.is_alive():
+            logger.debug(f"Terminating worker {i} (PID: {p.pid})")
+            p.terminate()
+    for i, p in enumerate(procs):
+        p.join(timeout=2)
+        if p.is_alive():
+            logger.warning(f"Force killing worker {i} (PID: {p.pid})")
+            p.kill()
+            p.join(timeout=2)
 
 
 def _cpu_hog(cores: int, duration: int):
     """
     Spawn multiple worker processes to consume CPU cores.
 
-    Ensures all processes are properly cleaned up even if exceptions occur.
+    The wait is interruptible: an abort or shutdown stops the workers
+    immediately. Workers are always terminated on the way out, whether the
+    exit is normal, an exception, or a signal-driven SystemExit.
     """
     logger.debug(
         "Spawning CPU worker processes", extra={"cores": cores, "duration": duration}
     )
 
+    parent = os.getpid()
     procs = [
-        multiprocessing.Process(target=_worker, args=(duration,)) for _ in range(cores)
+        multiprocessing.Process(target=_worker, args=(duration, parent), daemon=True)
+        for _ in range(cores)
     ]
 
     try:
@@ -36,11 +68,15 @@ def _cpu_hog(cores: int, duration: int):
                 "CPU worker process started", extra={"worker_id": i, "pid": p.pid}
             )
 
-        for i, p in enumerate(procs):
-            p.join()
-            logger.debug(
-                "CPU worker process completed", extra={"worker_id": i, "pid": p.pid}
+        interrupted = lifecycle.sleep(duration)
+        if interrupted:
+            logger.warning(
+                "CPU injection cut short", extra={"reason": "abort or shutdown"}
             )
+        else:
+            # Workers stop on their own at the deadline; give them a moment.
+            for p in procs:
+                p.join(timeout=5)
 
     except Exception as e:
         logger.error(
@@ -48,34 +84,24 @@ def _cpu_hog(cores: int, duration: int):
             exc_info=True,
             extra={"cores": cores, "error": str(e)},
         )
-
-        for i, p in enumerate(procs):
-            if p.is_alive():
-                logger.debug(f"Terminating worker {i} (PID: {p.pid})")
-                p.terminate()
-                p.join(timeout=2)
-                if p.is_alive():
-                    logger.warning(f"Force killing worker {i} (PID: {p.pid})")
-                    p.kill()
         raise
 
     finally:
-        # Final cleanup
-        alive_count = 0
-        for p in procs:
-            if p.is_alive():
-                alive_count += 1
-                p.terminate()
-                p.join(timeout=1)
-
-        if alive_count > 0:
-            logger.warning(
-                "Some CPU workers still alive after completion",
-                extra={"alive_count": alive_count},
-            )
+        _terminate(procs)
 
 
-def inject_cpu(config: dict, dry_run: bool = False):
+def inject_cpu(config, dry_run=False):
+    """
+    Inject CPU stress. Only one CPU injection runs at a time; a second request
+    is skipped (logged and counted) rather than stacked on the first.
+    """
+    with lifecycle.injection("cpu", enabled=not dry_run) as ticket:
+        if ticket is None and not dry_run:
+            return
+        _inject_cpu(config, dry_run)
+
+
+def _inject_cpu(config: dict, dry_run: bool = False):
     """
     Inject CPU stress by spawning worker processes.
 

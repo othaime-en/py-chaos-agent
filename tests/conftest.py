@@ -3,6 +3,7 @@
 import pytest
 import logging
 from src.metrics import INJECTIONS_CLAMPED, INJECTIONS_TOTAL, INJECTION_ACTIVE
+from src.lifecycle import lifecycle
 from src.resources import CgroupInfo, governor
 
 
@@ -20,6 +21,7 @@ def reset_metrics():
     INJECTION_ACTIVE._metrics.clear()
     INJECTIONS_CLAMPED._metrics.clear()
     governor.reset()
+    lifecycle.reset()
 
     # Explicitly initialize all label combinations to zero
     # This ensures a clean slate for every test
@@ -41,6 +43,7 @@ def reset_metrics():
     INJECTION_ACTIVE._metrics.clear()
     INJECTIONS_CLAMPED._metrics.clear()
     governor.reset()
+    lifecycle.reset()
 
 
 @pytest.fixture

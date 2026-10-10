@@ -1,12 +1,27 @@
 import subprocess
+import threading
 import time
-from typing import Tuple, Optional
+import uuid
+from typing import Dict, Iterable, List, Set, Tuple, Optional
 import re
+from ..lifecycle import lifecycle
 from ..limits import MAX_DURATION_SECONDS, within_upper_bound
 from ..metrics import INJECTIONS_TOTAL, INJECTION_ACTIVE
 from ..logging_config import get_logger
 
 logger = get_logger(__name__)
+
+# Every tc command and every change to the ownership table below happens under
+# this lock, so concurrent callers (the loop, a manual API call, shutdown, and
+# startup repair) can never interleave. It is re-entrant because shutdown runs
+# from signal handlers on the main thread, which may already hold it. It is
+# NOT held while an injection waits out its duration.
+_tc_lock = threading.RLock()
+
+# interface -> id of the injection that applied the rule. A rule is removed only
+# by its owner (or by shutdown), so one injection can never delete a rule that
+# another one applied.
+_applied: Dict[str, str] = {}
 
 
 def validate_interface_name(interface: str) -> Tuple[bool, Optional[str]]:
@@ -230,7 +245,8 @@ def cleanup_network_rules(interface="eth0"):
         return False, error
 
     # use list of args instead of shell string
-    result = _run_cmd(["tc", "qdisc", "del", "dev", interface, "root"])
+    with _tc_lock:
+        result = _run_cmd(["tc", "qdisc", "del", "dev", interface, "root"])
 
     if result.returncode == 0:
         logger.info(
@@ -261,6 +277,106 @@ def cleanup_network_rules(interface="eth0"):
         },
     )
     return False, result.stderr.strip()
+
+
+def _release_rule(interface: str, owner: str) -> Tuple[bool, Optional[str]]:
+    """
+    Remove the rule on ``interface`` if ``owner`` applied it. If the rule was
+    already removed (by shutdown) or belongs to someone else, do nothing.
+    """
+    with _tc_lock:
+        if _applied.get(interface) != owner:
+            logger.debug(
+                "Network rule not owned by this injection, leaving it",
+                extra={"interface": interface},
+            )
+            return True, None
+        success, error = cleanup_network_rules(interface)
+        # Forget ownership even if deletion failed: the failure is logged, and
+        # startup repair will retry. Keeping a stale claim would block nothing
+        # useful and could make a later cleanup delete a rule we did not apply.
+        _applied.pop(interface, None)
+        return success, error
+
+
+def cleanup_all_network_rules() -> None:
+    """
+    Remove every rule this process applied and still owns. Registered with the
+    lifecycle so it runs on shutdown, from signal handlers, and at exit.
+    Idempotent: a second call finds nothing to do.
+    """
+    with _tc_lock:
+        interfaces = list(_applied)
+        for interface in interfaces:
+            success, error = cleanup_network_rules(interface)
+            _applied.pop(interface, None)
+            if success:
+                logger.info(
+                    "Network rule removed during shutdown",
+                    extra={"interface": interface},
+                )
+            else:
+                logger.error(
+                    "Could not remove network rule during shutdown",
+                    extra={"interface": interface, "error": error},
+                )
+
+
+def _root_qdisc_is_netem(interface: str) -> bool:
+    result = _run_cmd(["tc", "qdisc", "show", "dev", interface, "root"])
+    return result.returncode == 0 and "netem" in result.stdout.lower()
+
+
+def reconcile_stale_rules(interfaces: Iterable[str]) -> List[str]:
+    """
+    Remove netem rules left behind by a previous run that could not clean up
+    (SIGKILL, an OOM kill, a crash). Call at startup.
+
+    The agent treats a netem root qdisc on an interface it is configured to
+    manage as its own. Other kinds of root qdisc are never touched. Interfaces
+    this process is currently injecting on are skipped.
+
+    Returns the interfaces that were repaired.
+    """
+    repaired: List[str] = []
+    seen: Set[str] = set()
+    for interface in interfaces:
+        if interface in seen:
+            continue
+        seen.add(interface)
+
+        if not validate_interface_name(interface)[0]:
+            continue
+        try:
+            with _tc_lock:
+                if interface in _applied:
+                    continue
+                if not _root_qdisc_is_netem(interface):
+                    continue
+                success, error = cleanup_network_rules(interface)
+        except Exception as e:  # tc missing, no permission, timeout
+            logger.debug(
+                "Could not check for stale network rules",
+                extra={"interface": interface, "error": str(e)},
+            )
+            continue
+
+        if success:
+            repaired.append(interface)
+            logger.warning(
+                "Removed stale network rule left by a previous run",
+                extra={"interface": interface},
+            )
+        else:
+            logger.error(
+                "Found a stale network rule but could not remove it",
+                extra={"interface": interface, "error": error},
+            )
+    return repaired
+
+
+# Run on shutdown, from signal handlers, and at interpreter exit.
+lifecycle.register_cleanup("network-rules", cleanup_all_network_rules)
 
 
 def inject_network(config: dict, dry_run: bool = False):
@@ -328,6 +444,18 @@ def inject_network(config: dict, dry_run: bool = False):
         INJECTIONS_TOTAL.labels(failure_type="network", status="skipped").inc()
         return
 
+    # Only one network injection at a time. A refused request is logged and
+    # counted as skipped by the lifecycle.
+    with lifecycle.injection("network") as ticket:
+        if ticket is None:
+            return
+        _run_network_injection(interface, delay_ms, duration)
+
+
+def _run_network_injection(interface: str, delay_ms: int, duration: int) -> None:
+    """Apply the rule, hold it, and always remove it. Caller holds the guard."""
+    owner = uuid.uuid4().hex
+
     logger.info(
         "Starting network latency injection",
         extra={
@@ -342,34 +470,39 @@ def inject_network(config: dict, dry_run: bool = False):
     start_time = time.time()
 
     try:
-        # Clean any existing rules first
-        logger.debug("Performing pre-injection cleanup")
-        success, error = cleanup_network_rules(interface)
-        if not success:
-            raise Exception(f"Pre-cleanup failed: {error}")
+        with _tc_lock:
+            # Claim the interface BEFORE touching it, so that if we are
+            # interrupted halfway, shutdown still knows to clean it up.
+            _applied[interface] = owner
 
-        # use safe command execution (no shell)
-        logger.debug(
-            "Adding network delay rule",
-            extra={"interface": interface, "delay_ms": delay_ms},
-        )
+            # Clean any existing rules first
+            logger.debug("Performing pre-injection cleanup")
+            success, error = cleanup_network_rules(interface)
+            if not success:
+                raise Exception(f"Pre-cleanup failed: {error}")
 
-        result = _run_cmd(
-            [
-                "tc",
-                "qdisc",
-                "add",
-                "dev",
-                interface,
-                "root",
-                "netem",
-                "delay",
-                f"{delay_ms}ms",
-            ]
-        )
+            # use safe command execution (no shell)
+            logger.debug(
+                "Adding network delay rule",
+                extra={"interface": interface, "delay_ms": delay_ms},
+            )
 
-        if result.returncode != 0:
-            raise Exception(f"Failed to add delay: {result.stderr}")
+            result = _run_cmd(
+                [
+                    "tc",
+                    "qdisc",
+                    "add",
+                    "dev",
+                    interface,
+                    "root",
+                    "netem",
+                    "delay",
+                    f"{delay_ms}ms",
+                ]
+            )
+
+            if result.returncode != 0:
+                raise Exception(f"Failed to add delay: {result.stderr}")
 
         logger.info(
             "Network delay rule applied successfully",
@@ -379,7 +512,12 @@ def inject_network(config: dict, dry_run: bool = False):
         INJECTIONS_TOTAL.labels(failure_type="network", status="success").inc()
 
         logger.debug(f"Holding network delay for {duration} seconds")
-        time.sleep(duration)
+        # Returns early on abort or shutdown; the finally below removes the rule.
+        if lifecycle.sleep(duration):
+            logger.warning(
+                "Network injection cut short",
+                extra={"interface": interface, "reason": "abort or shutdown"},
+            )
 
     except Exception as e:
         elapsed = time.time() - start_time
@@ -403,7 +541,7 @@ def inject_network(config: dict, dry_run: bool = False):
     finally:
         # Always cleanup
         logger.debug("Performing post-injection cleanup")
-        success, error = cleanup_network_rules(interface)
+        success, error = _release_rule(interface, owner)
 
         if success:
             logger.info(

@@ -62,6 +62,7 @@ nav:
       - Kubernetes Deployment: user-guide/kubernetes.md
       - API Security: user-guide/api-security.md
       - Blast Radius: user-guide/blast-radius.md
+      - Shutdown and Cleanup: user-guide/shutdown-and-cleanup.md
       - Failure Modes: user-guide/failure-modes.md
       - Troubleshooting: user-guide/troubleshooting.md
   - Development:
