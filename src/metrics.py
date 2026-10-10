@@ -9,6 +9,12 @@ INJECTIONS_TOTAL = Counter(
     ["failure_type", "status"],  # status: success, skipped, failed
 )
 
+INJECTIONS_CLAMPED = Counter(
+    "chaos_injections_clamped_total",
+    "Injections reduced to fit the container's resource budget",
+    ["failure_type"],
+)
+
 INJECTION_ACTIVE = Gauge(
     "chaos_injection_active", "Currently active chaos injection", ["failure_type"]
 )

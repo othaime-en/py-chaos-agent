@@ -2,7 +2,8 @@
 
 import pytest
 import logging
-from src.metrics import INJECTIONS_TOTAL, INJECTION_ACTIVE
+from src.metrics import INJECTIONS_CLAMPED, INJECTIONS_TOTAL, INJECTION_ACTIVE
+from src.resources import CgroupInfo, governor
 
 
 @pytest.fixture(autouse=True)
@@ -17,6 +18,8 @@ def reset_metrics():
     # Clear the internal metrics dictionaries
     INJECTIONS_TOTAL._metrics.clear()
     INJECTION_ACTIVE._metrics.clear()
+    INJECTIONS_CLAMPED._metrics.clear()
+    governor.reset()
 
     # Explicitly initialize all label combinations to zero
     # This ensures a clean slate for every test
@@ -36,6 +39,8 @@ def reset_metrics():
     # Optional: Clean up after test (helps with test isolation)
     INJECTIONS_TOTAL._metrics.clear()
     INJECTION_ACTIVE._metrics.clear()
+    INJECTIONS_CLAMPED._metrics.clear()
+    governor.reset()
 
 
 @pytest.fixture
@@ -55,3 +60,15 @@ def setup_logging():
     yield
     # Clean up handlers after test
     logging.getLogger().handlers.clear()
+
+
+@pytest.fixture
+def big_machine(monkeypatch):
+    """
+    Pretend the host has plenty of CPU and memory and no container limits, so
+    tests about static limits are not affected by the machine running them.
+    """
+    monkeypatch.setattr(governor, "_cpu_reader", lambda: 64)
+    monkeypatch.setattr(governor, "_memory_reader", lambda: 64 * 1024**3)
+    monkeypatch.setattr(governor, "_cgroup_reader", lambda: CgroupInfo())
+    return governor
