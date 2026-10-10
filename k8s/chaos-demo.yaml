@@ -14,18 +14,26 @@ data:
       interval_seconds: 15
       dry_run: false
 
+    # Injections are held to a fraction of the chaos-agent container's own
+    # CPU and memory limits (see resources: below). require_cgroup_limits makes
+    # the agent refuse CPU/memory injections if those limits are ever removed.
+    safety:
+      cpu_fraction: 0.8
+      memory_fraction: 0.5
+      require_cgroup_limits: true
+
     failures:
       cpu:
         enabled: true
         duration_seconds: 8
         probability: 0.4
-        cores: 2
+        cores: 1
 
       memory:
         enabled: false
         duration_seconds: 10
         probability: 0.2
-        mb: 300
+        mb: 150
 
       process:
         enabled: true
@@ -61,10 +69,28 @@ spec:
           imagePullPolicy: Never
           ports:
             - containerPort: 8080
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
 
         - name: chaos-agent
           image: py-chaos-agent:latest
           imagePullPolicy: Never
+          # These limits are the blast-radius boundary for CPU and memory
+          # injections: the kernel enforces them, and the agent sizes its
+          # injections to a fraction of them (config: safety). Without them a
+          # CPU or memory injection would compete with every pod on the node.
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
           volumeMounts:
             - name: config
               mountPath: /app/config.yaml
