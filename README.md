@@ -100,7 +100,9 @@ See [Configuration Guide](docs/configuration.md) for detailed options.
 
 ## Architecture
 
-Py-Chaos-Agent runs as a sidecar container in Kubernetes, sharing the process and network namespaces with your target application. This allows it to inject failures while maintaining isolation from other pods.
+Py-Chaos-Agent runs as a sidecar container in Kubernetes, sharing the process and network namespaces with your target application. Process kills and network latency act on that pod only.
+
+CPU and memory injections run inside the sidecar's own container, so they are bounded by **that container's resource limits**, and the agent sizes them to a fraction of those limits. This protection exists only when limits are set (the demo manifests set them). Without limits, a CPU or memory injection competes with every pod on the node. See [Blast Radius](docs/user-guide/blast-radius.md).
 
 ```
 ┌─────────────────────────────────────┐

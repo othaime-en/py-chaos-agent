@@ -61,6 +61,7 @@ nav:
       - Monitoring: user-guide/monitoring.md
       - Kubernetes Deployment: user-guide/kubernetes.md
       - API Security: user-guide/api-security.md
+      - Blast Radius: user-guide/blast-radius.md
       - Failure Modes: user-guide/failure-modes.md
       - Troubleshooting: user-guide/troubleshooting.md
   - Development:

@@ -285,17 +285,24 @@ def inject_disk(config: dict, dry_run: bool = False):
 
 ### Resource Limits
 
-Consider setting resource limits on the chaos agent pod:
+Set CPU and memory limits on the chaos-agent container. They are the boundary for
+CPU and memory injections: the kernel enforces them, and the agent reads them and
+sizes injections to a fraction of what is available (CPU is clamped, memory is
+refused if it does not fit).
 
 ```yaml
 resources:
-  limits:
-    cpu: 500m
-    memory: 512Mi
   requests:
     cpu: 100m
     memory: 128Mi
+  limits:
+    cpu: "1"
+    memory: 512Mi
 ```
+
+Without limits, injections compete with every pod on the node. See
+[Blast Radius](blast-radius.md) for the full model, the `safety` settings, and
+what limits do not do.
 
 ### Metrics Impact
 
