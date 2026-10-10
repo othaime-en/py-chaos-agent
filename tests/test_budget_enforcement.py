@@ -135,6 +135,13 @@ def wait_for_memory_threads():
             t.join(timeout=5)
 
 
+@pytest.fixture(autouse=True)
+def no_leftover_memory_threads():
+    """A real allocation thread from an earlier test could finish mid-test and
+    bump this test's counters, so wait for any to end first."""
+    wait_for_memory_threads()
+
+
 class TestMemoryBudget:
     def test_oversized_request_is_refused(self, monkeypatch):
         set_container(monkeypatch, mem_limit_mb=1000)  # budget 500
@@ -177,9 +184,11 @@ class TestMemoryBudget:
         assert started.wait(5)
         assert reserved()["memory_mb"] == 300
 
-        # A second injection that would push past the budget is refused
+        # A second memory injection while one is running is skipped by the
+        # overlap guard, and does not disturb the first one's reservation
         memory.inject_memory({"mb": 300, "duration_seconds": 1})
-        assert counter("memory", "failed") == 1
+        assert counter("memory", "skipped") == 1
+        assert counter("memory", "failed") == 0
         assert reserved()["memory_mb"] == 300
 
         finish.set()
