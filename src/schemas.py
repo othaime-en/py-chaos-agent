@@ -155,9 +155,31 @@ class FailuresSection(_StrictModel):
     network: Optional[NetworkFailureConfig] = None
 
 
+class SafetyConfig(_StrictModel):
+    """
+    Operator-only safety knobs (see src/resources.py). Not settable through
+    the API, so a remote caller cannot loosen them.
+    """
+
+    cpu_fraction: float = Field(
+        default=limits.DEFAULT_CPU_FRACTION,
+        ge=limits.MIN_SAFETY_FRACTION,
+        le=limits.MAX_CPU_FRACTION,
+        allow_inf_nan=False,
+    )
+    memory_fraction: float = Field(
+        default=limits.DEFAULT_MEMORY_FRACTION,
+        ge=limits.MIN_SAFETY_FRACTION,
+        le=limits.MAX_MEMORY_FRACTION,
+        allow_inf_nan=False,
+    )
+    require_cgroup_limits: bool = False
+
+
 class AppConfig(_StrictModel):
     agent: AgentSettings
     failures: FailuresSection
+    safety: SafetyConfig = Field(default_factory=SafetyConfig)
     # Validated elsewhere (logging_config / kill switch). Passed through as-is.
     logging: Optional[Dict[str, Any]] = None
     kill_switch: Optional[Dict[str, Any]] = None
@@ -193,6 +215,7 @@ def validate_config_dict(raw: Any) -> Dict[str, Any]:
             for name in FAILURE_TYPES
             if getattr(model.failures, name) is not None
         },
+        "safety": model.safety.model_dump(),
     }
     if model.logging is not None:
         normalized["logging"] = model.logging

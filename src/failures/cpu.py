@@ -1,7 +1,8 @@
 import multiprocessing
 import time
 from ..limits import MAX_CORES, MAX_DURATION_SECONDS, within_upper_bound
-from ..metrics import INJECTIONS_TOTAL, INJECTION_ACTIVE
+from ..metrics import INJECTIONS_CLAMPED, INJECTIONS_TOTAL, INJECTION_ACTIVE
+from ..resources import governor
 from ..logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -103,14 +104,44 @@ def inject_cpu(config: dict, dry_run: bool = False):
         INJECTIONS_TOTAL.labels(failure_type="cpu", status="failed").inc()
         return
 
+    # Fit the request to this container's real CPU budget. Fewer workers still
+    # produce load, so an oversized request is clamped rather than refused.
+    grant = (governor.preview_cores if dry_run else governor.acquire_cores)(cores)
+    if not grant.ok:
+        logger.error(
+            "CPU injection refused - outside resource budget",
+            extra={"cores": cores, "reason": grant.reason, "status": "failed"},
+        )
+        INJECTIONS_TOTAL.labels(failure_type="cpu", status="failed").inc()
+        return
+
+    requested_cores = cores
+    cores = grant.granted
+    if grant.clamped:
+        logger.warning(
+            "CPU injection clamped to resource budget",
+            extra={
+                "requested_cores": requested_cores,
+                "effective_cores": cores,
+                "reason": grant.reason,
+            },
+        )
+        INJECTIONS_CLAMPED.labels(failure_type="cpu").inc()
+
     if dry_run:
         logger.info(
             "CPU injection (DRY RUN)",
-            extra={"cores": cores, "duration_seconds": duration, "dry_run": True},
+            extra={
+                "cores": requested_cores,
+                "effective_cores": cores,
+                "duration_seconds": duration,
+                "dry_run": True,
+            },
         )
         INJECTIONS_TOTAL.labels(failure_type="cpu", status="skipped").inc()
         return
 
+    # From here the cores are reserved. The finally below releases them.
     logger.info(
         "Starting CPU stress injection",
         extra={"cores": cores, "duration_seconds": duration, "operation": "cpu_stress"},
@@ -154,5 +185,6 @@ def inject_cpu(config: dict, dry_run: bool = False):
         )
 
     finally:
+        governor.release_cores(cores)
         INJECTION_ACTIVE.labels(failure_type="cpu").set(0)
         logger.debug("CPU injection active metric reset to 0")

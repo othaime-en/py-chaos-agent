@@ -7,6 +7,7 @@ import uuid
 import logging
 from .config import load_config, validate_config
 from .metrics import start_metrics_server
+from .resources import apply_settings_and_report
 from .failures.network import cleanup_network_rules
 from .logging_config import (
     setup_logging,
@@ -79,6 +80,8 @@ def main():
 
     for warning in validate_config(config):
         logger.warning("Configuration warning", extra={"warning": warning})
+
+    apply_settings_and_report(config.safety)
     logger.info(
         "Configuration loaded successfully",
         extra={

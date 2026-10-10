@@ -2,6 +2,7 @@ import time
 import threading
 from ..limits import MAX_DURATION_SECONDS, MAX_MEMORY_MB, within_upper_bound
 from ..metrics import INJECTIONS_TOTAL, INJECTION_ACTIVE
+from ..resources import governor
 from ..logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -107,6 +108,18 @@ def inject_memory(config: dict, dry_run: bool = False):
         INJECTIONS_TOTAL.labels(failure_type="memory", status="failed").inc()
         return
 
+    # Refuse (not clamp) allocations that do not fit the container's real
+    # memory headroom: a smaller allocation would silently run a different
+    # experiment, and an oversized one risks an OOM kill.
+    grant = (governor.preview_memory if dry_run else governor.acquire_memory)(mb)
+    if not grant.ok:
+        logger.error(
+            "Memory injection refused - exceeds available memory budget",
+            extra={"mb": mb, "reason": grant.reason, "status": "failed"},
+        )
+        INJECTIONS_TOTAL.labels(failure_type="memory", status="failed").inc()
+        return
+
     if dry_run:
         logger.info(
             "Memory injection (DRY RUN)",
@@ -114,6 +127,8 @@ def inject_memory(config: dict, dry_run: bool = False):
         )
         INJECTIONS_TOTAL.labels(failure_type="memory", status="skipped").inc()
         return
+
+    # From here the memory is reserved; the thread's finally releases it.
 
     logger.info(
         "Starting memory pressure injection",
@@ -172,6 +187,7 @@ def inject_memory(config: dict, dry_run: bool = False):
             )
 
         finally:
+            governor.release_memory(mb)
             INJECTION_ACTIVE.labels(failure_type="memory").set(0)
             logger.debug(
                 "Memory injection thread completing", extra={"thread_id": thread_id}
@@ -181,7 +197,13 @@ def inject_memory(config: dict, dry_run: bool = False):
     thread = threading.Thread(
         target=_injection_thread, daemon=True, name="memory-injection"
     )
-    thread.start()
+    try:
+        thread.start()
+    except BaseException:
+        # The thread never ran, so its finally will not release the reservation.
+        governor.release_memory(mb)
+        INJECTION_ACTIVE.labels(failure_type="memory").set(0)
+        raise
 
     logger.debug(
         "Memory injection thread spawned",

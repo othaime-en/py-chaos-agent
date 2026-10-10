@@ -49,3 +49,13 @@ def within_upper_bound(value: object, maximum: int) -> bool:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return False
     return value <= maximum
+
+
+# Safety fractions (see src/resources.py). These bound how much of the
+# container's real CPU and memory budget an injection may use. The ceilings
+# stop an operator from configuring "use 100%".
+MIN_SAFETY_FRACTION = 0.1
+MAX_CPU_FRACTION = 0.9
+MAX_MEMORY_FRACTION = 0.8
+DEFAULT_CPU_FRACTION = 0.8
+DEFAULT_MEMORY_FRACTION = 0.5

@@ -213,3 +213,32 @@ class TestValidateConfigWarnings:
         )
         warnings = validate_config(garbage)
         assert any("not a number" in w for w in warnings)
+
+
+class TestSafetySettings:
+    def test_defaults_when_section_absent(self, tmp_path):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("agent: {}\nfailures: {}\n")
+        safety = load_config(str(config_file)).safety
+        assert (safety.cpu_fraction, safety.memory_fraction) == (0.8, 0.5)
+        assert safety.require_cgroup_limits is False
+
+    def test_values_loaded_from_file(self, tmp_path):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            "agent: {}\nfailures: {}\n"
+            "safety: {cpu_fraction: 0.3, memory_fraction: 0.2, "
+            "require_cgroup_limits: true}\n"
+        )
+        safety = load_config(str(config_file)).safety
+        assert safety.cpu_fraction == 0.3
+        assert safety.memory_fraction == 0.2
+        assert safety.require_cgroup_limits is True
+
+    def test_invalid_value_fails_load(self, tmp_path):
+        from src.schemas import ConfigValidationError
+
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("agent: {}\nfailures: {}\nsafety: {cpu_fraction: 1.0}\n")
+        with pytest.raises(ConfigValidationError, match="safety.cpu_fraction"):
+            load_config(str(config_file))

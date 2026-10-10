@@ -26,23 +26,49 @@ def client():
     return TestClient(app, headers={"Authorization": f"Bearer {TEST_TOKEN}"})
 
 
-@pytest.fixture(autouse=True)
-def reset_agent_state():
-    """Reset agent state before each test."""
+def _stop_agent_and_wait():
+    """
+    Stop any agent loop and wait until its thread has really exited.
+
+    Waiting matters: if a loop is still inside an injection when the next test
+    calls stop_event.clear(), the old thread resumes and keeps injecting into
+    every later test, bumping their metrics and reservations.
+    """
+    agent_state.stop_event.set()
+    if agent_state.kill_switch:
+        agent_state.kill_switch.stop_monitoring()
+        agent_state.kill_switch = None
+    thread = agent_state.agent_thread
+    if thread is not None and thread.is_alive():
+        thread.join(timeout=30)
+        if thread.is_alive():
+            pytest.fail(
+                "agent loop thread did not stop; it would leak into later tests"
+            )
     agent_state.enabled = False
     agent_state.agent_thread = None
+
+
+@pytest.fixture(autouse=True)
+def reset_agent_state(monkeypatch):
+    """
+    Reset agent state around every test.
+
+    Injectors are replaced with no-ops so a loop started through the API cannot
+    burn CPU, allocate memory or touch the network while tests run. Tests that
+    check injection behavior patch the injectors themselves.
+    """
+    for name in ("inject_cpu", "inject_memory", "inject_process", "inject_network"):
+        monkeypatch.setattr(f"src.api.{name}", lambda *a, **k: None)
+
+    _stop_agent_and_wait()
     agent_state.stop_event.clear()
     try:
         agent_state.config = load_config()
     except Exception:
         pass
     yield
-    # Cleanup after test
-    if agent_state.enabled:
-        agent_state.stop_event.set()
-        if agent_state.agent_thread:
-            agent_state.agent_thread.join(timeout=2)
-        agent_state.enabled = False
+    _stop_agent_and_wait()
 
 
 class TestGeneralEndpoints:
@@ -474,3 +500,116 @@ class TestInputValidation:
         response = client.post("/config/reload")
         assert response.status_code == 422
         assert agent_state.config is previous
+
+
+class TestResourceBudgetApi:
+    """/limits, manual-injection pre-flight, and operator-only safety settings."""
+
+    @pytest.fixture(autouse=True)
+    def container(self, monkeypatch):
+        from src.resources import MIB, CgroupInfo, governor
+
+        info = CgroupInfo(2, 4.0, 1000 * MIB, 0)  # cpu budget 3, memory budget 500
+        monkeypatch.setattr(governor, "_cgroup_reader", lambda: info)
+        monkeypatch.setattr(governor, "_cpu_reader", lambda: 8)
+        monkeypatch.setattr(governor, "_memory_reader", lambda: 64 * 1024 * MIB)
+
+    def test_limits_requires_auth(self):
+        assert TestClient(app).get("/limits").status_code == 401
+
+    def test_limits_reports_budget(self, client):
+        body = client.get("/limits").json()
+        assert body["budget"]["max_cores"] == 3
+        assert body["budget"]["max_memory_mb"] == 500
+        assert body["cgroup"]["cpu_limit_cores"] == 4.0
+        assert body["cgroup"]["memory_limit_mb"] == 1000
+        assert body["reserved"] == {"cores": 0, "memory_mb": 0}
+        assert body["safety"]["require_cgroup_limits"] is False
+
+    def test_manual_memory_over_budget_is_422(self, client, monkeypatch):
+        called = []
+        monkeypatch.setattr("src.api.inject_memory", lambda *a, **k: called.append(1))
+        response = client.post(
+            "/inject/manual",
+            json={"failure_type": "memory", "config": {"mb": 900}},
+        )
+        assert response.status_code == 422
+        detail = response.json()["detail"][0]
+        assert detail["loc"] == ["memory", "mb"]
+        assert "900 MB requested" in detail["msg"]
+        assert called == []
+
+    def test_manual_memory_within_budget_is_accepted(self, client, monkeypatch):
+        monkeypatch.setattr("src.api.inject_memory", lambda *a, **k: None)
+        response = client.post(
+            "/inject/manual",
+            json={"failure_type": "memory", "config": {"mb": 100}},
+        )
+        assert response.status_code == 200
+
+    def test_manual_cpu_over_budget_is_clamped_and_reported(self, client, monkeypatch):
+        seen = []
+        monkeypatch.setattr(
+            "src.api.inject_cpu", lambda cfg, dry_run=False: seen.append(cfg)
+        )
+        response = client.post(
+            "/inject/manual",
+            json={"failure_type": "cpu", "config": {"cores": 12}},
+        )
+        assert response.status_code == 200
+        assert response.json()["clamped_cores"] == 3
+
+    def test_manual_cpu_within_budget_has_no_clamp_field(self, client, monkeypatch):
+        monkeypatch.setattr("src.api.inject_cpu", lambda *a, **k: None)
+        response = client.post(
+            "/inject/manual",
+            json={"failure_type": "cpu", "config": {"cores": 2}},
+        )
+        assert "clamped_cores" not in response.json()
+
+    def test_manual_cpu_refused_when_budget_exhausted(self, client):
+        from src.resources import governor
+
+        governor.acquire_cores(3)
+        response = client.post(
+            "/inject/manual", json={"failure_type": "cpu", "config": {"cores": 1}}
+        )
+        assert response.status_code == 422
+        assert "exhausted" in response.json()["detail"][0]["msg"]
+
+    @pytest.mark.parametrize("failure", ["process", "network"])
+    def test_other_failure_types_skip_the_resource_check(
+        self, client, failure, monkeypatch
+    ):
+        monkeypatch.setattr("src.api.inject_process", lambda *a, **k: None)
+        monkeypatch.setattr("src.api.inject_network", lambda *a, **k: None)
+        response = client.post(
+            "/inject/manual", json={"failure_type": failure, "dry_run": True}
+        )
+        assert response.status_code == 200
+
+    def test_safety_cannot_be_changed_through_the_api(self, client):
+        response = client.patch(
+            "/config", json={"safety": {"require_cgroup_limits": False}}
+        )
+        assert response.status_code == 422
+
+    def test_reload_applies_safety_settings_from_file(self, client, monkeypatch):
+        from src.config import Config
+        from src.resources import governor
+
+        reloaded = Config(
+            {
+                "agent": {},
+                "failures": {},
+                "safety": {
+                    "cpu_fraction": 0.25,
+                    "memory_fraction": 0.1,
+                    "require_cgroup_limits": True,
+                },
+            }
+        )
+        monkeypatch.setattr("src.api.load_config", lambda: reloaded)
+        assert client.post("/config/reload").status_code == 200
+        assert governor.settings.cpu_fraction == 0.25
+        assert governor.settings.require_cgroup_limits is True

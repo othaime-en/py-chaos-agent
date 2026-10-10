@@ -18,6 +18,7 @@ from contextlib import asynccontextmanager
 from .auth import auth_disabled, get_expected_token, require_auth
 from . import limits
 from .config import Config, load_config, validate_config
+from .resources import apply_settings_and_report, governor
 from .schemas import (
     ConfigValidationError,
     merge_failure_config,
@@ -79,6 +80,7 @@ async def lifespan(app: FastAPI):
         logger.info("API started, configuration loaded")
         for warning in validate_config(config):
             logger.warning("Configuration warning", extra={"warning": warning})
+        apply_settings_and_report(config.safety)
     except Exception as e:
         logger.error(f"Failed to load config on startup: {e}")
         agent_state.config = None
@@ -471,6 +473,29 @@ async def manual_injection(
     except ConfigValidationError as e:
         raise _validation_error(e)
 
+    # Pre-flight against the live resource budget so an unsafe request fails
+    # here with a clear reason instead of silently inside the background task.
+    # CPU requests above budget are clamped (reported below); memory requests
+    # above budget are refused.
+    clamped_to: Optional[int] = None
+    if failure_type == "cpu":
+        grant = governor.preview_cores(failure_config["cores"])
+        field = "cores"
+    elif failure_type == "memory":
+        grant = governor.preview_memory(failure_config["mb"])
+        field = "mb"
+    else:
+        grant = None
+        field = ""
+    if grant is not None:
+        if not grant.ok:
+            raise HTTPException(
+                status_code=422,
+                detail=[{"loc": [failure_type, field], "msg": grant.reason}],
+            )
+        if grant.clamped:
+            clamped_to = grant.granted
+
     logger.info(
         f"Manual injection requested: {failure_type}",
         extra={"failure_type": failure_type, "dry_run": request.dry_run},
@@ -492,12 +517,30 @@ async def manual_injection(
     # Run in background to not block API
     background_tasks.add_task(inject)
 
-    return {
+    response: Dict[str, Any] = {
         "status": "injecting",
         "failure_type": failure_type,
         "dry_run": request.dry_run,
         "message": f"Manual {failure_type} injection started",
     }
+    if clamped_to is not None:
+        response["clamped_cores"] = clamped_to
+    return response
+
+
+# ============================================================================
+# Resource Budget
+# ============================================================================
+
+
+@app.get("/limits", tags=["Safety"])
+async def get_limits():
+    """
+    Report the live resource budget: detected cgroup limits, how many cores and
+    how much memory injections may use right now, what running injections have
+    reserved, and warnings if the container has no limits.
+    """
+    return governor.snapshot()
 
 
 # ============================================================================
@@ -645,6 +688,7 @@ async def reload_config():
     try:
         config = load_config()
         agent_state.config = config
+        apply_settings_and_report(config.safety)
         logger.info("Configuration reloaded from file")
 
         return {

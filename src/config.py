@@ -9,6 +9,7 @@ import yaml
 from pathlib import Path
 from typing import Any, Dict
 
+from .resources import SafetySettings
 from .schemas import validate_config_dict
 
 
@@ -35,6 +36,14 @@ class Config:
         # Parse typed configs
         self.agent = AgentConfig(config_dict.get("agent", {}))
         self.failures = config_dict.get("failures", {})
+        safety = config_dict.get("safety", {})
+        self.safety = SafetySettings(
+            **{
+                k: v
+                for k, v in (safety if isinstance(safety, dict) else {}).items()
+                if k in SafetySettings.__dataclass_fields__
+            }
+        )
 
     def get_logging_config(self) -> Dict[str, Any]:
         """Get logging configuration from config."""

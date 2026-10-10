@@ -10,6 +10,8 @@ services:
       - "127.0.0.1:8000:8000"
       - "127.0.0.1:9000:9000"
     restart: always
+    cpus: 1.0
+    mem_limit: 256m
 
   chaos-agent:
     build:
@@ -19,6 +21,12 @@ services:
     pid: "service:target-app"
     # Least privilege: no `privileged: true`. NET_ADMIN is needed for `tc`
     # latency injection, KILL for signalling the target process.
+    # Resource limits are the blast-radius boundary for CPU and memory
+    # injections. The agent sizes injections to a fraction of these
+    # (config.yaml: safety). pids_limit stops a runaway fork.
+    cpus: 1.0
+    mem_limit: 512m
+    pids_limit: 256
     cap_drop:
       - ALL
     cap_add:

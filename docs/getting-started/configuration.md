@@ -52,8 +52,10 @@ Hard limits (defined in `src/limits.py`):
 The injectors also enforce the upper limits themselves, so code that bypasses
 config loading and the API still cannot start unbounded load.
 
-These ceilings are fixed constants for now. Making CPU and memory limits relative
-to the container's cgroup limits is planned as a follow-up.
+These ceilings are absolute. On top of them, CPU and memory injections are also
+held to the container's real cgroup limits at the moment of injection (see
+[Safety Settings](#safety-settings) and [Blast Radius](../user-guide/blast-radius.md)),
+so the effective limit is whichever is lower.
 
 Example error:
 
@@ -62,6 +64,25 @@ Invalid configuration:
   failures.cpu.cores: Input should be less than or equal to 16
   failures.network.interface: String should match pattern '^[A-Za-z0-9._:-]{1,15}$'
 ```
+
+## Safety Settings
+
+The `safety` section sizes CPU and memory injections to the container's real
+limits. All keys are optional.
+
+```yaml
+safety:
+  cpu_fraction: 0.8            # 0.1 to 0.9, share of the CPU limit injections may use
+  memory_fraction: 0.5         # 0.1 to 0.8, share of free memory injections may use
+  require_cgroup_limits: false # true: refuse CPU/memory injections if no limit is set
+```
+
+- CPU requests above the budget are **clamped** (fewer workers run).
+- Memory requests above the budget are **refused**, with the reason logged.
+- These settings can only be changed in this file. The API rejects attempts to
+  change them.
+
+See [Blast Radius](../user-guide/blast-radius.md) for how the budget is computed.
 
 ## Agent Configuration
 

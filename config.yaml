@@ -63,6 +63,25 @@ kill_switch:
   target_health_url: "http://localhost:8080/health"  # Adjust for your setup
   health_check_timeout_seconds: 2
 
+# Safety budget for CPU and memory injections
+#
+# The agent reads this container's cgroup limits (Docker --cpus/--memory,
+# Kubernetes resources.limits) and sizes injections to a fraction of them.
+# CPU requests above the budget are clamped; memory requests above it are
+# refused. These settings can only be changed here, never through the API.
+safety:
+  # Share of the container's CPU limit that injections may use (0.1 to 0.9)
+  cpu_fraction: 0.8
+
+  # Share of the container's free memory that injections may use (0.1 to 0.8)
+  memory_fraction: 0.5
+
+  # If true, refuse CPU/memory injections when the container has no limit set.
+  # Recommended in Kubernetes and any shared environment. Leave false for
+  # local development without limits (the agent then bounds itself by host
+  # CPU count and available memory only).
+  require_cgroup_limits: false
+
 # Failure injection configurations
 failures:
   # CPU stress injection
