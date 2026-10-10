@@ -500,3 +500,116 @@ class TestInputValidation:
         response = client.post("/config/reload")
         assert response.status_code == 422
         assert agent_state.config is previous
+
+
+class TestResourceBudgetApi:
+    """/limits, manual-injection pre-flight, and operator-only safety settings."""
+
+    @pytest.fixture(autouse=True)
+    def container(self, monkeypatch):
+        from src.resources import MIB, CgroupInfo, governor
+
+        info = CgroupInfo(2, 4.0, 1000 * MIB, 0)  # cpu budget 3, memory budget 500
+        monkeypatch.setattr(governor, "_cgroup_reader", lambda: info)
+        monkeypatch.setattr(governor, "_cpu_reader", lambda: 8)
+        monkeypatch.setattr(governor, "_memory_reader", lambda: 64 * 1024 * MIB)
+
+    def test_limits_requires_auth(self):
+        assert TestClient(app).get("/limits").status_code == 401
+
+    def test_limits_reports_budget(self, client):
+        body = client.get("/limits").json()
+        assert body["budget"]["max_cores"] == 3
+        assert body["budget"]["max_memory_mb"] == 500
+        assert body["cgroup"]["cpu_limit_cores"] == 4.0
+        assert body["cgroup"]["memory_limit_mb"] == 1000
+        assert body["reserved"] == {"cores": 0, "memory_mb": 0}
+        assert body["safety"]["require_cgroup_limits"] is False
+
+    def test_manual_memory_over_budget_is_422(self, client, monkeypatch):
+        called = []
+        monkeypatch.setattr("src.api.inject_memory", lambda *a, **k: called.append(1))
+        response = client.post(
+            "/inject/manual",
+            json={"failure_type": "memory", "config": {"mb": 900}},
+        )
+        assert response.status_code == 422
+        detail = response.json()["detail"][0]
+        assert detail["loc"] == ["memory", "mb"]
+        assert "900 MB requested" in detail["msg"]
+        assert called == []
+
+    def test_manual_memory_within_budget_is_accepted(self, client, monkeypatch):
+        monkeypatch.setattr("src.api.inject_memory", lambda *a, **k: None)
+        response = client.post(
+            "/inject/manual",
+            json={"failure_type": "memory", "config": {"mb": 100}},
+        )
+        assert response.status_code == 200
+
+    def test_manual_cpu_over_budget_is_clamped_and_reported(self, client, monkeypatch):
+        seen = []
+        monkeypatch.setattr(
+            "src.api.inject_cpu", lambda cfg, dry_run=False: seen.append(cfg)
+        )
+        response = client.post(
+            "/inject/manual",
+            json={"failure_type": "cpu", "config": {"cores": 12}},
+        )
+        assert response.status_code == 200
+        assert response.json()["clamped_cores"] == 3
+
+    def test_manual_cpu_within_budget_has_no_clamp_field(self, client, monkeypatch):
+        monkeypatch.setattr("src.api.inject_cpu", lambda *a, **k: None)
+        response = client.post(
+            "/inject/manual",
+            json={"failure_type": "cpu", "config": {"cores": 2}},
+        )
+        assert "clamped_cores" not in response.json()
+
+    def test_manual_cpu_refused_when_budget_exhausted(self, client):
+        from src.resources import governor
+
+        governor.acquire_cores(3)
+        response = client.post(
+            "/inject/manual", json={"failure_type": "cpu", "config": {"cores": 1}}
+        )
+        assert response.status_code == 422
+        assert "exhausted" in response.json()["detail"][0]["msg"]
+
+    @pytest.mark.parametrize("failure", ["process", "network"])
+    def test_other_failure_types_skip_the_resource_check(
+        self, client, failure, monkeypatch
+    ):
+        monkeypatch.setattr("src.api.inject_process", lambda *a, **k: None)
+        monkeypatch.setattr("src.api.inject_network", lambda *a, **k: None)
+        response = client.post(
+            "/inject/manual", json={"failure_type": failure, "dry_run": True}
+        )
+        assert response.status_code == 200
+
+    def test_safety_cannot_be_changed_through_the_api(self, client):
+        response = client.patch(
+            "/config", json={"safety": {"require_cgroup_limits": False}}
+        )
+        assert response.status_code == 422
+
+    def test_reload_applies_safety_settings_from_file(self, client, monkeypatch):
+        from src.config import Config
+        from src.resources import governor
+
+        reloaded = Config(
+            {
+                "agent": {},
+                "failures": {},
+                "safety": {
+                    "cpu_fraction": 0.25,
+                    "memory_fraction": 0.1,
+                    "require_cgroup_limits": True,
+                },
+            }
+        )
+        monkeypatch.setattr("src.api.load_config", lambda: reloaded)
+        assert client.post("/config/reload").status_code == 200
+        assert governor.settings.cpu_fraction == 0.25
+        assert governor.settings.require_cgroup_limits is True
