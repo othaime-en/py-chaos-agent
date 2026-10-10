@@ -246,6 +246,10 @@ kubectl logs -n chaos-demo <pod-name> -c chaos-agent | grep "Failed:"
 
 **Network rules conflict:**
 
+If the agent was killed without warning (SIGKILL, OOM kill), it could not remove
+its rule. It repairs this at the next startup. See
+[Shutdown and Cleanup](shutdown-and-cleanup.md). To remove it right away:
+
 ```bash
 # Clean up manually
 kubectl exec -n chaos-demo <pod-name> -c chaos-agent -- tc qdisc del dev eth0 root 2>/dev/null

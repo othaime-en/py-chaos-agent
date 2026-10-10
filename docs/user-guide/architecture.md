@@ -217,18 +217,19 @@ The process killer includes logic to avoid terminating itself:
 
 ### Cleanup on Exit
 
-Signal handlers ensure graceful shutdown:
+Cleanup does not depend on how the process leaves. A lifecycle module tracks
+running injections and a registry of cleanup functions (the network module
+registers one that removes its `tc` rules). It runs them from:
 
-```python
-signal.signal(signal.SIGTERM, signal_handler)
-signal.signal(signal.SIGINT, signal_handler)
-```
+- the `SIGTERM` / `SIGINT` handlers (the standalone agent, and a `ChaosServer`
+  hook for the API server)
+- the API lifespan shutdown
+- an `atexit` hook
 
-On shutdown:
-
-- All network rules are removed
-- Active injections are logged
-- Metrics are flushed
+Running injections are woken and aborted first, so the process exits promptly
+instead of waiting out an injection. A rule left by a hard kill is repaired at the
+next startup. See [Shutdown and Cleanup](shutdown-and-cleanup.md) for the guarantees
+and the one case that cannot be covered.
 
 ### Dry Run Mode
 

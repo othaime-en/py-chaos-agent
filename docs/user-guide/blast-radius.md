@@ -129,3 +129,6 @@ consequence worth understanding:
 
 Process kill and network latency are different: they act on the target (or the
 whole pod) directly, and are bounded by validation rather than by resource limits.
+
+For what happens to an injection's effect when the agent stops or is killed, see
+[Shutdown and Cleanup](shutdown-and-cleanup.md).
