@@ -36,7 +36,7 @@ class TestCpuLimits:
         cpu.inject_cpu({"cores": 10**6, "duration_seconds": 1}, dry_run=True)
         assert failed("cpu") == 1
 
-    def test_values_at_the_limit_are_allowed(self, monkeypatch):
+    def test_values_at_the_limit_are_allowed(self, monkeypatch, big_machine):
         calls = []
         monkeypatch.setattr(cpu, "_cpu_hog", lambda c, d: calls.append((c, d)))
         cpu.inject_cpu(
