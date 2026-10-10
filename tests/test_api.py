@@ -26,23 +26,49 @@ def client():
     return TestClient(app, headers={"Authorization": f"Bearer {TEST_TOKEN}"})
 
 
-@pytest.fixture(autouse=True)
-def reset_agent_state():
-    """Reset agent state before each test."""
+def _stop_agent_and_wait():
+    """
+    Stop any agent loop and wait until its thread has really exited.
+
+    Waiting matters: if a loop is still inside an injection when the next test
+    calls stop_event.clear(), the old thread resumes and keeps injecting into
+    every later test, bumping their metrics and reservations.
+    """
+    agent_state.stop_event.set()
+    if agent_state.kill_switch:
+        agent_state.kill_switch.stop_monitoring()
+        agent_state.kill_switch = None
+    thread = agent_state.agent_thread
+    if thread is not None and thread.is_alive():
+        thread.join(timeout=30)
+        if thread.is_alive():
+            pytest.fail(
+                "agent loop thread did not stop; it would leak into later tests"
+            )
     agent_state.enabled = False
     agent_state.agent_thread = None
+
+
+@pytest.fixture(autouse=True)
+def reset_agent_state(monkeypatch):
+    """
+    Reset agent state around every test.
+
+    Injectors are replaced with no-ops so a loop started through the API cannot
+    burn CPU, allocate memory or touch the network while tests run. Tests that
+    check injection behavior patch the injectors themselves.
+    """
+    for name in ("inject_cpu", "inject_memory", "inject_process", "inject_network"):
+        monkeypatch.setattr(f"src.api.{name}", lambda *a, **k: None)
+
+    _stop_agent_and_wait()
     agent_state.stop_event.clear()
     try:
         agent_state.config = load_config()
     except Exception:
         pass
     yield
-    # Cleanup after test
-    if agent_state.enabled:
-        agent_state.stop_event.set()
-        if agent_state.agent_thread:
-            agent_state.agent_thread.join(timeout=2)
-        agent_state.enabled = False
+    _stop_agent_and_wait()
 
 
 class TestGeneralEndpoints:
