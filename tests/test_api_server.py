@@ -25,9 +25,11 @@ def captured(monkeypatch):
     """Stub out the network side effects and capture uvicorn's arguments."""
     calls = {}
     monkeypatch.setattr(api_server, "start_metrics_server", lambda port: None)
-    monkeypatch.setattr(
-        api_server.uvicorn, "run", lambda app, **kwargs: calls.update(kwargs)
-    )
+
+    def fake_run(self):
+        calls.update(host=self.config.host, port=self.config.port)
+
+    monkeypatch.setattr(api_server.ChaosServer, "run", fake_run)
     return calls
 
 

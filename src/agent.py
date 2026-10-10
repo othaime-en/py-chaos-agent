@@ -8,7 +8,8 @@ import logging
 from .config import load_config, validate_config
 from .metrics import start_metrics_server
 from .resources import apply_settings_and_report
-from .failures.network import cleanup_network_rules
+from .failures.network import reconcile_stale_rules
+from .lifecycle import lifecycle
 from .logging_config import (
     setup_logging,
     get_logger,
@@ -26,34 +27,21 @@ FAILURE_MODULES = {
     "network": ".failures.network",
 }
 
-# Track configured interfaces for cleanup
-_configured_interfaces: set[str] = set()
-
 
 def cleanup_on_exit():
-    """Clean up any active network rules on shutdown."""
+    """Run all registered cleanups (network rules, and anything else)."""
     logger.info("Performing cleanup on shutdown")
-
-    for interface in _configured_interfaces:
-        success, error = cleanup_network_rules(interface)
-        if success:
-            logger.info(
-                "Network rules cleaned up successfully", extra={"interface": interface}
-            )
-        else:
-            logger.warning(
-                "Failed to cleanup network rules",
-                extra={"interface": interface, "error": error},
-            )
+    lifecycle.run_cleanups()
 
 
 def signal_handler(sig, frame):
-    """Handle shutdown signals gracefully."""
-    logger.info(
-        "Shutdown signal received",
-        extra={"signal": sig, "signal_name": signal.Signals(sig).name},
-    )
-    cleanup_on_exit()
+    """
+    Handle shutdown signals: wake and abort any in-flight injection, run the
+    cleanups (so a tc rule is removed immediately), then exit.
+    """
+    name = signal.Signals(sig).name
+    logger.info("Shutdown signal received", extra={"signal": sig, "signal_name": name})
+    lifecycle.shutdown(f"signal {name}")
     logger.info("Agent shutdown complete")
     sys.exit(0)
 
@@ -93,26 +81,24 @@ def main():
         },
     )
 
-    # Register signal handlers for graceful shutdown
+    # Register signal handlers for graceful shutdown, and run cleanups at
+    # interpreter exit as a backstop for exits that bypass the handlers.
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
+    lifecycle.install_atexit()
     logger.debug("Signal handlers registered")
 
-    # Startup cleanup
+    # Startup repair: a previous run killed by SIGKILL or the OOM killer cannot
+    # clean up after itself, so remove any netem rule it left on the interface
+    # we manage. Runs whether or not the network failure is currently enabled.
     logger.info("Performing startup cleanup")
-    if "network" in config.failures and config.failures["network"]["enabled"]:
+    if "network" in config.failures:
         interface = config.failures["network"].get("interface", "eth0")
-        _configured_interfaces.add(interface)
-        success, error = cleanup_network_rules(interface)
-        if success:
-            logger.info(
-                "Startup network cleanup completed", extra={"interface": interface}
-            )
-        else:
-            logger.warning(
-                "Startup network cleanup failed",
-                extra={"interface": interface, "error": error},
-            )
+        repaired = reconcile_stale_rules([interface])
+        logger.info(
+            "Startup network cleanup completed",
+            extra={"interface": interface, "stale_rule_removed": bool(repaired)},
+        )
 
     # Start metrics server
     try:
@@ -133,7 +119,7 @@ def main():
 
     # Main loop
     iteration = 0
-    while True:
+    while not lifecycle.is_shutting_down():
         try:
             iteration += 1
             # Create correlation ID for this iteration

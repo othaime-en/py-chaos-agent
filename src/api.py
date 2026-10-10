@@ -18,6 +18,8 @@ from contextlib import asynccontextmanager
 from .auth import auth_disabled, get_expected_token, require_auth
 from . import limits
 from .config import Config, load_config, validate_config
+from .failures.network import reconcile_stale_rules
+from .lifecycle import lifecycle
 from .resources import apply_settings_and_report, governor
 from .schemas import (
     ConfigValidationError,
@@ -81,9 +83,16 @@ async def lifespan(app: FastAPI):
         for warning in validate_config(config):
             logger.warning("Configuration warning", extra={"warning": warning})
         apply_settings_and_report(config.safety)
+
+        # Repair a netem rule left by a previous run that was SIGKILLed.
+        if "network" in config.failures:
+            reconcile_stale_rules([config.failures["network"].get("interface", "eth0")])
     except Exception as e:
         logger.error(f"Failed to load config on startup: {e}")
         agent_state.config = None
+
+    # Backstop for exits that bypass signal handling.
+    lifecycle.install_atexit()
 
     # Surface auth misconfiguration immediately instead of on first request.
     try:
@@ -96,10 +105,16 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    # Shutdown (optional cleanup)
+    # Shutdown: stop the loop, abort in-flight injections, remove their effects.
+    # (src.api_server also does this from the signal handler, because uvicorn
+    # waits for running background tasks before it reaches this point.)
     if agent_state.enabled:
         logger.info("Shutting down agent on API shutdown")
-        agent_state.stop_event.set()
+    agent_state.stop_event.set()
+    lifecycle.shutdown("api shutdown")
+    thread = agent_state.agent_thread
+    if thread is not None and thread.is_alive():
+        thread.join(timeout=5)
 
 
 # Interactive docs expose the full API surface and are served outside the
@@ -139,6 +154,7 @@ class AgentStatus(BaseModel):
     dry_run: bool
     interval_seconds: int
     enabled_failures: List[str]
+    active_injections: List[str] = []
 
 
 class ManualInjectionRequest(BaseModel):
@@ -191,7 +207,7 @@ def run_agent_loop():
     agent_state.start_time = start_time
     iteration = 0
 
-    while not agent_state.stop_event.is_set():
+    while not agent_state.stop_event.is_set() and not lifecycle.is_shutting_down():
         try:
             iteration += 1
             correlation_id = f"api-iter-{iteration}-{int(time.time())}"
@@ -334,6 +350,7 @@ async def get_status():
         dry_run=config.agent.dry_run,
         interval_seconds=config.agent.interval_seconds,
         enabled_failures=enabled_failures,
+        active_injections=lifecycle.active_types(),
     )
 
 
@@ -364,6 +381,8 @@ async def start_agent(enable_kill_switch: bool = True):
         def stop_agent_callback():
             logger.critical("Kill switch triggered, stopping agent")
             agent_state.stop_event.set()
+            # Do not leave a running injection to finish its full duration
+            lifecycle.abort_active("kill switch triggered")
 
         agent_state.kill_switch.start_monitoring(stop_agent_callback)
         logger.info("Kill switch enabled and monitoring started")
@@ -393,6 +412,9 @@ async def stop_agent():
 
     logger.info("Stopping chaos agent via API")
     agent_state.stop_event.set()
+    # Cut short any running injection so its effect is removed now, not when
+    # its duration would have ended.
+    lifecycle.abort_active("agent stopped")
 
     # Stop kill switch monitoring
     if agent_state.kill_switch:
@@ -496,6 +518,15 @@ async def manual_injection(
         if grant.clamped:
             clamped_to = grant.granted
 
+    if not request.dry_run:
+        if lifecycle.is_shutting_down():
+            raise HTTPException(status_code=503, detail="Agent is shutting down")
+        if lifecycle.is_active(failure_type):
+            raise HTTPException(
+                status_code=409,
+                detail=f"A {failure_type} injection is already running",
+            )
+
     logger.info(
         f"Manual injection requested: {failure_type}",
         extra={"failure_type": failure_type, "dry_run": request.dry_run},
@@ -526,6 +557,17 @@ async def manual_injection(
     if clamped_to is not None:
         response["clamped_cores"] = clamped_to
     return response
+
+
+@app.post("/inject/abort", tags=["Injections"])
+async def abort_injections():
+    """
+    Cut short every injection that is running right now (manual or from the
+    agent loop). Their effects are removed immediately instead of at the end of
+    their duration. Does not stop the agent loop; use /agent/stop for that.
+    """
+    aborted = lifecycle.abort_active("aborted via API")
+    return {"status": "aborted", "aborted": aborted}
 
 
 # ============================================================================
