@@ -391,3 +391,54 @@ def test_kubernetes_configmap_is_valid():
             validate_config_dict(yaml.safe_load(d["data"]["config.yaml"]))
             found = True
     assert found, "no ConfigMap with config.yaml found"
+
+
+# ---------------------------------------------------------------------------
+# safety section
+# ---------------------------------------------------------------------------
+
+
+def test_safety_defaults_are_normalized_in():
+    out = validate_config_dict(doc())
+    assert out["safety"] == {
+        "cpu_fraction": limits.DEFAULT_CPU_FRACTION,
+        "memory_fraction": limits.DEFAULT_MEMORY_FRACTION,
+        "require_cgroup_limits": False,
+    }
+
+
+def test_safety_accepts_valid_values():
+    raw = doc()
+    raw["safety"] = {
+        "cpu_fraction": limits.MAX_CPU_FRACTION,
+        "memory_fraction": limits.MIN_SAFETY_FRACTION,
+        "require_cgroup_limits": True,
+    }
+    assert validate_config_dict(raw)["safety"]["require_cgroup_limits"] is True
+
+
+@pytest.mark.parametrize(
+    "key,bad",
+    [
+        ("cpu_fraction", 0.05),
+        ("cpu_fraction", 0.95),
+        ("cpu_fraction", 1.0),
+        ("cpu_fraction", float("nan")),
+        ("memory_fraction", 0.05),
+        ("memory_fraction", 0.85),
+        ("memory_fraction", 1.0),
+        ("memory_fraction", "0.5"),
+        ("require_cgroup_limits", "true"),
+        ("require_cgroup_limits", 1),
+    ],
+)
+def test_safety_rejects_out_of_range_or_wrong_type(key, bad):
+    raw = doc()
+    raw["safety"] = {key: bad}
+    assert f"safety.{key}" in error_paths(raw)
+
+
+def test_safety_rejects_unknown_key():
+    raw = doc()
+    raw["safety"] = {"cpu_fractionn": 0.5}
+    assert "safety.cpu_fractionn" in error_paths(raw)
