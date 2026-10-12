@@ -13,7 +13,7 @@ import threading
 import time
 import random
 from datetime import datetime
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 
 from .auth import auth_disabled, get_expected_token, require_auth
 from . import limits
@@ -31,12 +31,7 @@ from .failures.process import inject_process
 from .failures.network import inject_network
 from .logging_config import get_logger, set_correlation_id
 from .metrics import INJECTIONS_TOTAL, INJECTION_ACTIVE
-from .kill_switch import (
-    KillSwitch,
-    PRODUCTION_CONFIG,
-    wrap_injection_with_context,
-    CircuitState,
-)
+from .kill_switch import KillSwitch, KillSwitchOpen
 
 logger = get_logger(__name__)
 
@@ -51,6 +46,9 @@ class AgentState:
     stop_event: threading.Event = threading.Event()
     start_time: Optional[float] = None
     kill_switch: Optional[KillSwitch] = None
+    # True only if the loop was started with the kill switch explicitly turned
+    # off (and the config allows that). Defaults to protected.
+    kill_switch_bypass: bool = False
 
 
 agent_state = AgentState()
@@ -61,6 +59,51 @@ def get_config() -> Config:
     if agent_state.config is None:
         raise HTTPException(status_code=500, detail="Configuration not loaded")
     return agent_state.config
+
+
+def _chaos_armed() -> bool:
+    """Chaos is active while the loop runs or any injection is in flight."""
+    return agent_state.enabled or bool(lifecycle.active_types())
+
+
+def _on_kill_switch_trip() -> None:
+    """Called when the kill switch opens: do not let a running injection finish
+    its full duration against an unhealthy target."""
+    lifecycle.abort_active("kill switch triggered")
+
+
+def apply_kill_switch_config(config: Config) -> None:
+    """
+    Create or update the process-wide kill switch from the config.
+
+    One kill switch lives for the life of the process, so stopping and starting
+    the agent (or reloading the config) can never reset a tripped breaker.
+    """
+    ks = agent_state.kill_switch
+    if ks is not None:
+        ks.update_config(config.kill_switch)  # keeps breaker state
+        if config.kill_switch.enabled:
+            ks.start_monitoring(_on_kill_switch_trip)
+        return
+
+    if not config.kill_switch.enabled:
+        logger.warning(
+            "Kill switch is disabled in config: chaos will run without "
+            "automatic protection"
+        )
+        return
+
+    ks = KillSwitch(config.kill_switch, is_armed=_chaos_armed)
+    ks.start_monitoring(_on_kill_switch_trip)
+    agent_state.kill_switch = ks
+
+
+def _active_kill_switch() -> Optional[KillSwitch]:
+    """The kill switch that should gate injections right now, if any."""
+    if agent_state.kill_switch_bypass:
+        return None
+    ks = agent_state.kill_switch
+    return ks if ks is not None and ks.config.enabled else None
 
 
 def _validation_error(exc: ConfigValidationError) -> HTTPException:
@@ -83,6 +126,7 @@ async def lifespan(app: FastAPI):
         for warning in validate_config(config):
             logger.warning("Configuration warning", extra={"warning": warning})
         apply_settings_and_report(config.safety)
+        apply_kill_switch_config(config)
 
         # Repair a netem rule left by a previous run that was SIGKILLed.
         if "network" in config.failures:
@@ -115,6 +159,9 @@ async def lifespan(app: FastAPI):
     thread = agent_state.agent_thread
     if thread is not None and thread.is_alive():
         thread.join(timeout=5)
+    if agent_state.kill_switch is not None:
+        agent_state.kill_switch.stop_monitoring()
+        agent_state.kill_switch = None
 
 
 # Interactive docs expose the full API surface and are served outside the
@@ -155,6 +202,7 @@ class AgentStatus(BaseModel):
     interval_seconds: int
     enabled_failures: List[str]
     active_injections: List[str] = []
+    paused_by_kill_switch: bool = False
 
 
 class ManualInjectionRequest(BaseModel):
@@ -200,16 +248,32 @@ class FailureConfigResponse(BaseModel):
 # ============================================================================
 
 
+def _run_injection(name: str, cfg: Dict[str, Any], dry_run: bool) -> None:
+    """Run one injection by name. Looks the function up at call time."""
+    injectors = {
+        "cpu": inject_cpu,
+        "memory": inject_memory,
+        "process": inject_process,
+        "network": inject_network,
+    }
+    injectors[name](cfg, dry_run=dry_run)
+
+
 def run_agent_loop():
     """Background agent loop with kill switch protection."""
     logger.info("API-controlled agent loop starting")
     start_time = time.time()
     agent_state.start_time = start_time
     iteration = 0
+    paused = False
 
     while not agent_state.stop_event.is_set() and not lifecycle.is_shutting_down():
         try:
             iteration += 1
+            ks = _active_kill_switch()
+            if paused and (ks is None or ks.allows_injection()[0]):
+                logger.info("Kill switch closed, chaos resuming")
+                paused = False
             correlation_id = f"api-iter-{iteration}-{int(time.time())}"
             set_correlation_id(correlation_id)
 
@@ -232,60 +296,23 @@ def run_agent_loop():
                 )
 
                 try:
-                    # Wrap injections with failure context tracking
-                    if agent_state.kill_switch:
-                        failure_context = agent_state.kill_switch.failure_context
-                    else:
-                        failure_context = None
-
-                    if name == "cpu":
-                        if failure_context:
-                            wrap_injection_with_context(
-                                "cpu",
-                                inject_cpu,
-                                failure_context,
-                                cfg,
-                                dry_run=config.agent.dry_run,
-                            )
-                        else:
-                            inject_cpu(cfg, dry_run=config.agent.dry_run)
-
-                    elif name == "memory":
-                        if failure_context:
-                            wrap_injection_with_context(
-                                "memory",
-                                inject_memory,
-                                failure_context,
-                                cfg,
-                                dry_run=config.agent.dry_run,
-                            )
-                        else:
-                            inject_memory(cfg, dry_run=config.agent.dry_run)
-
-                    elif name == "process":
-                        if failure_context:
-                            wrap_injection_with_context(
-                                "process",
-                                inject_process,
-                                failure_context,
-                                cfg,
-                                dry_run=config.agent.dry_run,
-                            )
-                        else:
-                            inject_process(cfg, dry_run=config.agent.dry_run)
-
-                    elif name == "network":
-                        if failure_context:
-                            wrap_injection_with_context(
-                                "network",
-                                inject_network,
-                                failure_context,
-                                cfg,
-                                dry_run=config.agent.dry_run,
-                            )
-                        else:
-                            inject_network(cfg, dry_run=config.agent.dry_run)
-
+                    ks = _active_kill_switch()
+                    with (
+                        ks.injection(name, config.agent.dry_run)
+                        if ks
+                        else nullcontext()
+                    ):
+                        _run_injection(name, cfg, config.agent.dry_run)
+                except KillSwitchOpen as e:
+                    # Chaos is paused, not stopped: skip the rest of this tick
+                    # and try again next interval. It resumes by itself once
+                    # the kill switch closes.
+                    if not paused:
+                        logger.warning(
+                            "Chaos paused by kill switch", extra={"reason": e.reason}
+                        )
+                        paused = True
+                    break
                 except Exception as e:
                     logger.error(
                         f"Failure injection error: {e}",
@@ -342,6 +369,7 @@ async def get_status():
         uptime = time.time() - agent_state.start_time
 
     enabled_failures = [name for name, cfg in config.failures.items() if cfg["enabled"]]
+    ks = _active_kill_switch()
 
     return AgentStatus(
         enabled=agent_state.enabled,
@@ -351,56 +379,62 @@ async def get_status():
         interval_seconds=config.agent.interval_seconds,
         enabled_failures=enabled_failures,
         active_injections=lifecycle.active_types(),
+        paused_by_kill_switch=bool(ks and ks.paused),
     )
 
 
 @app.post("/agent/start", tags=["Agent Control"])
-async def start_agent(enable_kill_switch: bool = True):
-    """Start the chaos agent loop with optional kill switch."""
+async def start_agent(enable_kill_switch: Optional[bool] = None):
+    """
+    Start the chaos agent loop.
+
+    The kill switch is controlled by the ``kill_switch`` section of the config,
+    not by this request. ``enable_kill_switch=false`` is honored only if the
+    config sets ``kill_switch.allow_api_disable: true``; otherwise it is refused.
+    """
     if agent_state.enabled:
         raise HTTPException(status_code=400, detail="Agent already running")
 
     if agent_state.config is None:
         raise HTTPException(status_code=500, detail="Configuration not loaded")
 
+    config = agent_state.config
     logger.info("Starting chaos agent via API")
 
-    # Initialize kill switch if enabled
-    if enable_kill_switch:
-        # Get target health URL from config or use default
-        # config = get_config()
-
-        # Create kill switch with production config
-        kill_switch_config = PRODUCTION_CONFIG
-        # Override target URL if needed
-        # kill_switch_config.target_health_url = "http://target-app:8080/health"
-
-        agent_state.kill_switch = KillSwitch(kill_switch_config)
-
-        # Start monitoring with callback to stop agent
-        def stop_agent_callback():
-            logger.critical("Kill switch triggered, stopping agent")
-            agent_state.stop_event.set()
-            # Do not leave a running injection to finish its full duration
-            lifecycle.abort_active("kill switch triggered")
-
-        agent_state.kill_switch.start_monitoring(stop_agent_callback)
-        logger.info("Kill switch enabled and monitoring started")
-    else:
-        agent_state.kill_switch = None
+    if enable_kill_switch is False:
+        if config.kill_switch.enabled and not config.kill_switch.allow_api_disable:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "The kill switch cannot be disabled through the API "
+                    "(kill_switch.allow_api_disable is false)"
+                ),
+            )
+        agent_state.kill_switch_bypass = True
         logger.warning(
-            "Kill switch disabled - chaos will run without automatic protection"
+            "Kill switch bypassed for this run: chaos will run without "
+            "automatic protection"
         )
+    else:
+        agent_state.kill_switch_bypass = False
+
+    # Normally created at startup. Create it now if it is missing (for example
+    # if the config was fixed after a failed first load).
+    if agent_state.kill_switch is None:
+        apply_kill_switch_config(config)
 
     agent_state.stop_event.clear()
     agent_state.enabled = True
     agent_state.agent_thread = threading.Thread(target=run_agent_loop, daemon=True)
     agent_state.agent_thread.start()
 
+    ks = _active_kill_switch()
     return {
         "status": "started",
         "message": "Chaos agent started successfully",
-        "kill_switch_enabled": enable_kill_switch,
+        "kill_switch_enabled": ks is not None,
+        "kill_switch_state": ks.circuit_state.value if ks else None,
+        "paused_by_kill_switch": bool(ks and ks.paused),
     }
 
 
@@ -416,10 +450,8 @@ async def stop_agent():
     # its duration would have ended.
     lifecycle.abort_active("agent stopped")
 
-    # Stop kill switch monitoring
-    if agent_state.kill_switch:
-        agent_state.kill_switch.stop_monitoring()
-        agent_state.kill_switch = None
+    # The kill switch keeps running. It lives for the whole process, so stopping
+    # and starting the agent cannot be used to clear a tripped breaker.
 
     # Wait briefly for thread to stop
     if agent_state.agent_thread:
@@ -442,26 +474,34 @@ async def restart_agent():
 
 @app.get("/kill-switch/status", tags=["Kill Switch"])
 async def get_kill_switch_status():
-    """Get current kill switch status."""
-    if not agent_state.kill_switch:
-        return {"enabled": False, "message": "Kill switch not initialized"}
+    """Current kill switch state, last health check, and trip history."""
+    ks = agent_state.kill_switch
+    if ks is None:
+        return {"enabled": False, "message": "Kill switch is not enabled"}
 
-    return agent_state.kill_switch.get_status()
+    status = ks.get_status()
+    status["bypassed"] = agent_state.kill_switch_bypass
+    return status
 
 
 @app.post("/kill-switch/reset", tags=["Kill Switch"])
 async def reset_kill_switch():
-    """Reset kill switch state (useful after manual recovery)."""
-    if not agent_state.kill_switch:
-        raise HTTPException(status_code=400, detail="Kill switch not initialized")
+    """
+    Close the kill switch and clear any latch.
 
-    agent_state.kill_switch.consecutive_failures = 0
-    agent_state.kill_switch.consecutive_successes = 0
-    agent_state.kill_switch.circuit_state = CircuitState.CLOSED
+    The target must pass a health check right now, so a reset cannot be used to
+    resume chaos against a target that is still down. Returns 409 if it does not.
+    """
+    ks = agent_state.kill_switch
+    if ks is None:
+        raise HTTPException(status_code=400, detail="Kill switch is not enabled")
 
-    logger.info("Kill switch state reset")
+    ok, message = ks.reset()
+    if not ok:
+        raise HTTPException(status_code=409, detail=message)
 
-    return {"status": "reset", "message": "Kill switch state has been reset"}
+    logger.info("Kill switch reset via API")
+    return {"status": "reset", "message": message, **ks.get_status()}
 
 
 # ============================================================================
@@ -527,6 +567,14 @@ async def manual_injection(
                 detail=f"A {failure_type} injection is already running",
             )
 
+    # The kill switch gates manual injections too: never inject into a target
+    # that has been found unhealthy. Dry runs change nothing and are allowed.
+    ks = _active_kill_switch()
+    if ks is not None and not request.dry_run:
+        allowed, reason = ks.allows_injection()
+        if not allowed:
+            raise HTTPException(status_code=409, detail=f"Chaos paused: {reason}")
+
     logger.info(
         f"Manual injection requested: {failure_type}",
         extra={"failure_type": failure_type, "dry_run": request.dry_run},
@@ -534,14 +582,16 @@ async def manual_injection(
 
     def inject():
         try:
-            if failure_type == "cpu":
-                inject_cpu(failure_config, dry_run=request.dry_run)
-            elif failure_type == "memory":
-                inject_memory(failure_config, dry_run=request.dry_run)
-            elif failure_type == "process":
-                inject_process(failure_config, dry_run=request.dry_run)
-            elif failure_type == "network":
-                inject_network(failure_config, dry_run=request.dry_run)
+            # Re-checked here (not just above) in case the breaker tripped
+            # between the request and the background task starting. Also records
+            # the injection so a process kill earns its grace period.
+            with ks.injection(failure_type, request.dry_run) if ks else nullcontext():
+                _run_injection(failure_type, failure_config, request.dry_run)
+        except KillSwitchOpen as e:
+            logger.warning(
+                "Manual injection skipped: kill switch tripped before it started",
+                extra={"failure_type": failure_type, "reason": e.reason},
+            )
         except Exception as e:
             logger.error(f"Manual injection failed: {e}", exc_info=True)
 
@@ -731,6 +781,7 @@ async def reload_config():
         config = load_config()
         agent_state.config = config
         apply_settings_and_report(config.safety)
+        apply_kill_switch_config(config)
         logger.info("Configuration reloaded from file")
 
         return {

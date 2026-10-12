@@ -679,25 +679,25 @@ class TestInjectionLifecycleApi:
     def test_stop_aborts_in_flight_injections(self, client):
         from src.lifecycle import lifecycle
 
-        assert client.post("/agent/start?enable_kill_switch=false").status_code == 200
+        assert client.post("/agent/start").status_code == 200
         ticket, _ = lifecycle.begin("network")
         assert client.post("/agent/stop").status_code == 200
         assert ticket.interrupted
 
-    def test_kill_switch_trip_aborts_in_flight_injections(self, client, monkeypatch):
+    def test_kill_switch_trip_aborts_in_flight_injections(self, client):
         from src.lifecycle import lifecycle
 
-        captured = {}
-
-        def fake_start(self, callback):
-            captured["callback"] = callback
-
-        monkeypatch.setattr("src.api.KillSwitch.start_monitoring", fake_start)
         assert client.post("/agent/start").status_code == 200
+        ks = agent_state.kill_switch
+        ks.config.grace_after_agent_start_seconds = 0
+        ks._health_check = lambda: False
         ticket, _ = lifecycle.begin("cpu")
-        captured["callback"]()
+        for _ in range(ks.config.consecutive_failures_threshold):
+            ks._tick()
         assert ticket.interrupted
-        assert agent_state.stop_event.is_set()
+        # Chaos is paused, not stopped: the loop is still running
+        assert agent_state.enabled is True
+        assert not agent_state.stop_event.is_set()
 
     def test_lifespan_shutdown_aborts_and_cleans_up(self, monkeypatch):
         from src.lifecycle import lifecycle
@@ -721,3 +721,379 @@ class TestInjectionLifecycleApi:
         assert seen and seen[0] == [
             agent_state.config.failures["network"].get("interface", "eth0")
         ]
+
+
+class Target:
+    """Controllable health for the kill switch under test."""
+
+    def __init__(self, healthy=True):
+        self.healthy = healthy
+
+    def __call__(self):
+        return self.healthy
+
+
+def make_kill_switch(start_monitor=False, **overrides):
+    """
+    Create the process-wide kill switch from the loaded config, with a fake
+    health check and no grace period. Tests then drive the state machine with
+    _tick().
+
+    The monitor thread is NOT started unless asked for: it ticks once the moment
+    it starts, which would add a stray health check to a test's own ticks.
+    """
+    from src.api import apply_kill_switch_config
+    from src.kill_switch import KillSwitch
+
+    ks_cfg = agent_state.config.kill_switch
+    ks_cfg.health_check_interval_seconds = 3600
+    ks_cfg.grace_after_agent_start_seconds = 0
+    ks_cfg.recovery_test_interval_seconds = 3600
+    ks_cfg.recovery_success_threshold = 1
+    for key, value in overrides.items():
+        setattr(ks_cfg, key, value)
+
+    target = Target()
+    if start_monitor:
+        apply_kill_switch_config(agent_state.config)
+        ks = agent_state.kill_switch
+        ks._health_check = target
+        ks._is_armed = lambda: True
+    else:
+        ks = KillSwitch(ks_cfg, is_armed=lambda: True, health_check=target)
+        agent_state.kill_switch = ks
+    return ks, target
+
+
+def trip_it(ks, target):
+    target.healthy = False
+    for _ in range(ks.config.consecutive_failures_threshold):
+        ks._tick()
+    assert ks.circuit_state.value == "open"
+
+
+class TestKillSwitchApi:
+    def test_created_at_startup_and_stopped_at_shutdown(self):
+        with TestClient(app):
+            assert agent_state.kill_switch is not None
+            assert agent_state.kill_switch.get_status()["monitoring_active"]
+        assert agent_state.kill_switch is None
+
+    def test_not_created_when_disabled_in_config(self, client):
+        from src.api import apply_kill_switch_config
+
+        agent_state.config.kill_switch.enabled = False
+        apply_kill_switch_config(agent_state.config)
+        assert agent_state.kill_switch is None
+        body = client.get("/kill-switch/status").json()
+        assert body["enabled"] is False
+
+    def test_status_endpoint_reports_state(self, client):
+        ks, target = make_kill_switch()
+        body = client.get("/kill-switch/status").json()
+        assert body["circuit_state"] == "closed"
+        assert body["allows_injection"] is True
+        assert body["bypassed"] is False
+        trip_it(ks, target)
+        body = client.get("/kill-switch/status").json()
+        assert body["circuit_state"] == "open" and body["trip_count"] == 1
+
+    def test_agent_status_reports_paused(self, client):
+        ks, target = make_kill_switch()
+        assert client.get("/status").json()["paused_by_kill_switch"] is False
+        trip_it(ks, target)
+        assert client.get("/status").json()["paused_by_kill_switch"] is True
+
+    def test_kill_switch_cannot_be_configured_through_the_api(self, client):
+        response = client.patch("/config", json={"kill_switch": {"enabled": False}})
+        assert response.status_code == 422
+
+    # --- manual injections -------------------------------------------------
+
+    def test_manual_injection_refused_while_tripped(self, client, monkeypatch):
+        called = []
+        monkeypatch.setattr("src.api.inject_cpu", lambda *a, **k: called.append(1))
+        ks, target = make_kill_switch()
+        trip_it(ks, target)
+        response = client.post("/inject/manual", json={"failure_type": "cpu"})
+        assert response.status_code == 409
+        assert "Chaos paused" in response.json()["detail"]
+        assert called == []
+
+    def test_manual_dry_run_allowed_while_tripped(self, client, monkeypatch):
+        monkeypatch.setattr("src.api.inject_cpu", lambda *a, **k: None)
+        ks, target = make_kill_switch()
+        trip_it(ks, target)
+        response = client.post(
+            "/inject/manual", json={"failure_type": "cpu", "dry_run": True}
+        )
+        assert response.status_code == 200
+
+    def test_manual_injection_allowed_when_closed(self, client, monkeypatch):
+        called = []
+        monkeypatch.setattr("src.api.inject_cpu", lambda *a, **k: called.append(1))
+        make_kill_switch()
+        assert (
+            client.post("/inject/manual", json={"failure_type": "cpu"}).status_code
+            == 200
+        )
+        assert called == [1]
+
+    def test_manual_injection_is_tracked_in_the_failure_context(
+        self, client, monkeypatch
+    ):
+        ks, _ = make_kill_switch()
+        seen = []
+        monkeypatch.setattr(
+            "src.api.inject_cpu",
+            lambda *a, **k: seen.append(ks.failure_context.get_active_injections()),
+        )
+        client.post("/inject/manual", json={"failure_type": "cpu"})
+        assert seen == [{"cpu"}]
+        assert ks.failure_context.get_active_injections() == set()
+
+    def test_manual_process_kill_earns_a_grace_period(self, client, monkeypatch):
+        monkeypatch.setattr("src.api.inject_process", lambda *a, **k: None)
+        ks, _ = make_kill_switch()
+        client.post("/inject/manual", json={"failure_type": "process"})
+        assert ks.failure_context.is_in_process_kill_grace_period(60)
+
+    def test_manual_dry_run_process_earns_no_grace(self, client, monkeypatch):
+        monkeypatch.setattr("src.api.inject_process", lambda *a, **k: None)
+        ks, _ = make_kill_switch()
+        client.post("/inject/manual", json={"failure_type": "process", "dry_run": True})
+        assert not ks.failure_context.is_in_process_kill_grace_period(60)
+
+    def test_breaker_tripping_before_the_background_task_runs(
+        self, client, monkeypatch
+    ):
+        """The pre-flight passed, then the breaker opened before the task ran."""
+        from src.kill_switch import KillSwitchOpen
+
+        called = []
+        monkeypatch.setattr("src.api.inject_cpu", lambda *a, **k: called.append(1))
+        ks, _ = make_kill_switch()
+
+        def refuse(*a, **k):
+            raise KillSwitchOpen("tripped meanwhile")
+
+        monkeypatch.setattr(ks, "injection", refuse)
+        response = client.post("/inject/manual", json={"failure_type": "cpu"})
+        assert response.status_code == 200  # accepted; skipped quietly in background
+        assert called == []
+
+    # --- starting, stopping, bypass ---------------------------------------
+
+    def test_start_reports_kill_switch_state(self, client):
+        make_kill_switch()
+        body = client.post("/agent/start").json()
+        assert body["kill_switch_enabled"] is True
+        assert body["kill_switch_state"] == "closed"
+        assert body["paused_by_kill_switch"] is False
+
+    def test_disabling_through_the_api_is_refused_by_default(self, client):
+        make_kill_switch()
+        response = client.post("/agent/start?enable_kill_switch=false")
+        assert response.status_code == 403
+        assert "allow_api_disable" in response.json()["detail"]
+        assert agent_state.enabled is False
+
+    def test_disabling_through_the_api_when_the_config_allows_it(
+        self, client, monkeypatch
+    ):
+        ks, target = make_kill_switch(allow_api_disable=True)
+        trip_it(ks, target)
+        body = client.post("/agent/start?enable_kill_switch=false").json()
+        assert body["kill_switch_enabled"] is False
+        # Bypassed: manual injection is no longer gated
+        monkeypatch.setattr("src.api.inject_cpu", lambda *a, **k: None)
+        assert (
+            client.post("/inject/manual", json={"failure_type": "cpu"}).status_code
+            == 200
+        )
+        assert client.get("/kill-switch/status").json()["bypassed"] is True
+
+    def test_bypass_does_not_outlive_the_run(self, client):
+        make_kill_switch(allow_api_disable=True)
+        client.post("/agent/start?enable_kill_switch=false")
+        client.post("/agent/stop")
+        client.post("/agent/start")
+        assert agent_state.kill_switch_bypass is False
+
+    def test_disabling_is_harmless_when_the_config_already_disabled_it(self, client):
+        agent_state.config.kill_switch.enabled = False
+        assert client.post("/agent/start?enable_kill_switch=false").status_code == 200
+
+    def test_stop_and_start_do_not_reset_a_tripped_breaker(self, client):
+        ks, target = make_kill_switch()
+        client.post("/agent/start")
+        trip_it(ks, target)
+        client.post("/agent/stop")
+        body = client.post("/agent/start").json()
+        assert agent_state.kill_switch is ks, "kill switch was replaced"
+        assert body["kill_switch_state"] == "open"
+        assert body["paused_by_kill_switch"] is True
+
+    def test_restart_does_not_reset_a_tripped_breaker(self, client):
+        ks, target = make_kill_switch()
+        client.post("/agent/start")
+        trip_it(ks, target)
+        assert client.post("/agent/restart").status_code == 200
+        assert agent_state.kill_switch is ks
+        assert ks.circuit_state.value == "open"
+
+    def test_stop_leaves_the_monitor_running(self, client):
+        ks, _ = make_kill_switch(start_monitor=True)
+        client.post("/agent/start")
+        client.post("/agent/stop")
+        assert ks.get_status()["monitoring_active"] is True
+
+    def test_repeated_starts_do_not_leak_monitor_threads(self, client):
+        import threading
+
+        make_kill_switch(start_monitor=True)
+        for _ in range(3):
+            client.post("/agent/start")
+            client.post("/agent/stop")
+        monitors = [t for t in threading.enumerate() if t.name == "kill-switch-monitor"]
+        assert len(monitors) == 1
+
+    # --- reset -------------------------------------------------------------
+
+    def test_reset_without_a_kill_switch_is_400(self, client):
+        agent_state.config.kill_switch.enabled = False
+        assert client.post("/kill-switch/reset").status_code == 400
+
+    def test_reset_refused_while_the_target_is_unhealthy(self, client):
+        ks, target = make_kill_switch()
+        trip_it(ks, target)
+        response = client.post("/kill-switch/reset")
+        assert response.status_code == 409
+        assert "not healthy" in response.json()["detail"]
+        assert ks.circuit_state.value == "open"
+
+    def test_reset_closes_when_the_target_is_healthy(self, client):
+        ks, target = make_kill_switch()
+        trip_it(ks, target)
+        target.healthy = True
+        response = client.post("/kill-switch/reset")
+        assert response.status_code == 200
+        assert response.json()["circuit_state"] == "closed"
+        assert ks.allows_injection()[0] is True
+
+    def test_reset_requires_auth(self):
+        assert TestClient(app).post("/kill-switch/reset").status_code == 401
+
+    # --- trip behavior and the loop ---------------------------------------
+
+    def test_trip_leaves_the_loop_running_but_paused(self, client):
+        ks, target = make_kill_switch()
+        client.post("/agent/start")
+        trip_it(ks, target)
+        assert agent_state.enabled is True
+        assert not agent_state.stop_event.is_set()
+        assert client.get("/status").json()["paused_by_kill_switch"] is True
+
+    def test_loop_pauses_while_tripped_and_resumes_after_recovery(
+        self, client, monkeypatch
+    ):
+        import time as _time
+
+        count = []
+        monkeypatch.setattr("src.api.inject_cpu", lambda *a, **k: count.append(1))
+        for name, cfg in agent_state.config.failures.items():
+            cfg["enabled"] = name == "cpu"
+        agent_state.config.failures["cpu"]["probability"] = 1.0
+        agent_state.config.agent.interval_seconds = 1
+
+        ks, target = make_kill_switch(recovery_test_interval_seconds=0)
+        client.post("/agent/start")
+
+        def wait_for(pred, timeout=6):
+            deadline = _time.time() + timeout
+            while _time.time() < deadline:
+                if pred():
+                    return True
+                _time.sleep(0.05)
+            return False
+
+        assert wait_for(lambda: len(count) >= 1), "loop never injected"
+
+        trip_it(ks, target)
+        _time.sleep(0.3)  # let any tick already in flight finish
+        frozen = len(count)
+        _time.sleep(2.5)  # two full intervals
+        assert len(count) == frozen, "chaos kept running while the breaker was open"
+
+        target.healthy = True
+        ks._tick()  # OPEN -> HALF_OPEN (interval 0)
+        ks._tick()  # HALF_OPEN -> CLOSED (threshold 1)
+        assert ks.allows_injection()[0] is True
+        assert wait_for(lambda: len(count) > frozen), "chaos did not resume"
+
+    # --- reload ------------------------------------------------------------
+
+    def test_reload_updates_settings_but_keeps_breaker_state(self, client, monkeypatch):
+        from src.config import Config
+
+        ks, target = make_kill_switch()
+        trip_it(ks, target)
+        reloaded = Config(
+            {
+                "agent": {},
+                "failures": {},
+                "kill_switch": {"consecutive_failures_threshold": 9},
+            }
+        )
+        monkeypatch.setattr("src.api.load_config", lambda: reloaded)
+        assert client.post("/config/reload").status_code == 200
+        assert agent_state.kill_switch is ks
+        assert ks.config.consecutive_failures_threshold == 9
+        assert ks.circuit_state.value == "open", "reload must not clear a trip"
+
+
+class TestKillSwitchWiring:
+    def test_chaos_is_armed_while_the_loop_runs(self):
+        from src.api import _chaos_armed
+
+        assert _chaos_armed() is False
+        agent_state.enabled = True
+        assert _chaos_armed() is True
+
+    def test_chaos_is_armed_while_an_injection_runs(self):
+        from src.api import _chaos_armed
+        from src.lifecycle import lifecycle
+
+        assert _chaos_armed() is False
+        ticket, _ = lifecycle.begin("network")
+        assert _chaos_armed() is True
+        lifecycle.end(ticket)
+        assert _chaos_armed() is False
+
+    def test_apply_creates_one_kill_switch_and_reuses_it(self):
+        from src.api import apply_kill_switch_config
+
+        apply_kill_switch_config(agent_state.config)
+        first = agent_state.kill_switch
+        apply_kill_switch_config(agent_state.config)
+        assert agent_state.kill_switch is first
+
+    def test_apply_with_disabled_config_creates_nothing(self):
+        from src.api import apply_kill_switch_config
+
+        agent_state.config.kill_switch.enabled = False
+        apply_kill_switch_config(agent_state.config)
+        assert agent_state.kill_switch is None
+
+    def test_disabled_kill_switch_does_not_gate(self, client, monkeypatch):
+        from src.kill_switch import KillSwitch
+
+        ks, target = make_kill_switch()
+        trip_it(ks, target)
+        ks.config.enabled = False  # e.g. config reloaded with enabled: false
+        monkeypatch.setattr("src.api.inject_cpu", lambda *a, **k: None)
+        assert (
+            client.post("/inject/manual", json={"failure_type": "cpu"}).status_code
+            == 200
+        )
+        assert isinstance(ks, KillSwitch)
