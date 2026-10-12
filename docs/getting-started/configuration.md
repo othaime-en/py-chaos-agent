@@ -65,6 +65,25 @@ Invalid configuration:
   failures.network.interface: String should match pattern '^[A-Za-z0-9._:-]{1,15}$'
 ```
 
+## Kill Switch
+
+The `kill_switch` section pauses chaos when your application becomes unhealthy and
+resumes it after recovery. It is enabled by default and polls
+`http://localhost:8080/health`, so **set `target_health_url` to your application's
+real health endpoint**.
+
+```yaml
+kill_switch:
+  enabled: true
+  target_health_url: "http://localhost:8080/health"
+  consecutive_failures_threshold: 3
+  resume_after_recovery: true
+```
+
+All keys, ranges, the recovery behavior, and the related API are described in
+[Kill Switch](../user-guide/kill-switch.md). Like `safety`, this section can only
+be changed in the config file.
+
 ## Safety Settings
 
 The `safety` section sizes CPU and memory injections to the container's real
