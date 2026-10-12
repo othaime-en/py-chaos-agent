@@ -18,6 +18,7 @@ Rules, applied uniformly:
 """
 
 import re
+from urllib.parse import urlparse
 from typing import Annotated, Any, Dict, List, Mapping, Optional, Type
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
@@ -176,13 +177,91 @@ class SafetyConfig(_StrictModel):
     require_cgroup_limits: bool = False
 
 
+class KillSwitchSettings(_StrictModel):
+    """
+    The kill switch (see src/kill_switch.py). Operator-only: no API request can
+    change these, so a remote caller cannot weaken the protection.
+    """
+
+    enabled: bool = True
+    target_health_url: str = "http://localhost:8080/health"
+    health_check_interval_seconds: int = Field(
+        default=10,
+        ge=limits.MIN_KS_INTERVAL_SECONDS,
+        le=limits.MAX_KS_INTERVAL_SECONDS,
+    )
+    health_check_timeout_seconds: int = Field(
+        default=2,
+        ge=limits.MIN_KS_TIMEOUT_SECONDS,
+        le=limits.MAX_KS_TIMEOUT_SECONDS,
+    )
+    consecutive_failures_threshold: int = Field(
+        default=3, ge=limits.MIN_KS_THRESHOLD, le=limits.MAX_KS_THRESHOLD
+    )
+    grace_after_process_kill_seconds: int = Field(
+        default=60, ge=limits.MIN_KS_GRACE_SECONDS, le=limits.MAX_KS_GRACE_SECONDS
+    )
+    grace_after_agent_start_seconds: int = Field(
+        default=30, ge=limits.MIN_KS_GRACE_SECONDS, le=limits.MAX_KS_GRACE_SECONDS
+    )
+    recovery_test_interval_seconds: int = Field(
+        default=120,
+        ge=limits.MIN_KS_RECOVERY_INTERVAL_SECONDS,
+        le=limits.MAX_KS_RECOVERY_INTERVAL_SECONDS,
+    )
+    recovery_success_threshold: int = Field(
+        default=3, ge=limits.MIN_KS_THRESHOLD, le=limits.MAX_KS_THRESHOLD
+    )
+    # True: chaos pauses while the breaker is tripped and resumes by itself once
+    # the target has recovered. False: chaos stays off after a trip until an
+    # operator calls POST /kill-switch/reset (or restarts a standalone agent).
+    resume_after_recovery: bool = True
+    # False: nobody can turn the kill switch off through the API.
+    allow_api_disable: bool = False
+
+    @field_validator("target_health_url")
+    @classmethod
+    def _check_url(cls, value: str) -> str:
+        value = value.strip()
+        if not value or len(value) > limits.MAX_HEALTH_URL_LENGTH:
+            raise ValueError(
+                f"target_health_url must be 1 to {limits.MAX_HEALTH_URL_LENGTH} "
+                "characters"
+            )
+        if any(c.isspace() for c in value):
+            raise ValueError("target_health_url must not contain whitespace")
+        try:
+            parsed = urlparse(value)
+        except ValueError:
+            raise ValueError("target_health_url is not a valid URL") from None
+        if parsed.scheme not in ("http", "https"):
+            raise ValueError("target_health_url must start with http:// or https://")
+        if not parsed.hostname:
+            raise ValueError("target_health_url must include a host")
+        if parsed.username or parsed.password:
+            raise ValueError(
+                "target_health_url must not contain credentials; they would be "
+                "written to logs"
+            )
+        return value
+
+    @model_validator(mode="after")
+    def _timeout_fits_interval(self) -> "KillSwitchSettings":
+        if self.health_check_timeout_seconds > self.health_check_interval_seconds:
+            raise ValueError(
+                "health_check_timeout_seconds must not exceed "
+                "health_check_interval_seconds"
+            )
+        return self
+
+
 class AppConfig(_StrictModel):
     agent: AgentSettings
     failures: FailuresSection
     safety: SafetyConfig = Field(default_factory=SafetyConfig)
-    # Validated elsewhere (logging_config / kill switch). Passed through as-is.
+    # Validated elsewhere (logging_config). Passed through as-is.
     logging: Optional[Dict[str, Any]] = None
-    kill_switch: Optional[Dict[str, Any]] = None
+    kill_switch: KillSwitchSettings = Field(default_factory=KillSwitchSettings)
 
 
 # ---------------------------------------------------------------------------
@@ -193,7 +272,7 @@ class AppConfig(_StrictModel):
 def validate_config_dict(raw: Any) -> Dict[str, Any]:
     """
     Validate a whole config document and return it normalized (defaults filled
-    in). ``logging`` and ``kill_switch`` sections pass through untouched.
+    in). The ``logging`` section passes through untouched.
 
     Raises:
         ConfigValidationError: with every problem found, not just the first.
@@ -216,11 +295,10 @@ def validate_config_dict(raw: Any) -> Dict[str, Any]:
             if getattr(model.failures, name) is not None
         },
         "safety": model.safety.model_dump(),
+        "kill_switch": model.kill_switch.model_dump(),
     }
     if model.logging is not None:
         normalized["logging"] = model.logging
-    if model.kill_switch is not None:
-        normalized["kill_switch"] = model.kill_switch
     return normalized
 
 

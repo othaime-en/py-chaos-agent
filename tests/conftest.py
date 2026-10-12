@@ -75,3 +75,14 @@ def big_machine(monkeypatch):
     monkeypatch.setattr(governor, "_memory_reader", lambda: 64 * 1024**3)
     monkeypatch.setattr(governor, "_cgroup_reader", lambda: CgroupInfo())
     return governor
+
+
+@pytest.fixture
+def env(tmp_path):
+    """A working directory with a config and stand-ins for tc and ip, for tests
+    that run the agent or API server as real processes."""
+    from tests.process_helpers import Env
+
+    e = Env(tmp_path)
+    yield e
+    e.cleanup()

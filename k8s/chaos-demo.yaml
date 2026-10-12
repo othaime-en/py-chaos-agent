@@ -22,6 +22,16 @@ data:
       memory_fraction: 0.5
       require_cgroup_limits: true
 
+    # Pause chaos when the target's /health stops answering, and resume it by
+    # itself once the target has recovered. The sidecar shares the pod network,
+    # so localhost reaches the target container.
+    kill_switch:
+      enabled: true
+      target_health_url: "http://localhost:8080/health"
+      health_check_interval_seconds: 10
+      consecutive_failures_threshold: 3
+      resume_after_recovery: true
+
     failures:
       cpu:
         enabled: true

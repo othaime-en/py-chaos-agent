@@ -10,7 +10,7 @@ that no code can fully cover.
 | `SIGTERM` or `SIGINT` (standalone agent or API server) | In-flight injections are woken and aborted, the `tc` rule is removed, CPU workers are stopped, and the process exits promptly. It does not wait out the injection. |
 | `POST /agent/stop` | The loop stops and any running injection is aborted. Its effect is removed within milliseconds, not at the end of its duration. |
 | `POST /inject/abort` | Aborts every running injection (manual or from the loop). The loop keeps running. |
-| Kill switch trips | The loop stops and running injections are aborted. |
+| [Kill switch](kill-switch.md) trips | Running injections are aborted and their effects removed. The loop keeps running but pauses chaos until the target recovers. |
 | Normal interpreter exit or an unhandled exception | Cleanups run from an `atexit` hook. |
 | `SIGKILL`, OOM kill, node failure | **No code can run.** See [After a hard kill](#after-a-hard-kill). |
 

@@ -15,6 +15,23 @@ INJECTIONS_CLAMPED = Counter(
     ["failure_type"],
 )
 
+KILL_SWITCH_STATE = Gauge(
+    "chaos_kill_switch_state",
+    "Kill switch circuit state: 0 closed (chaos allowed), 1 open (tripped), "
+    "2 half-open (testing recovery)",
+)
+
+KILL_SWITCH_TRIPS = Counter(
+    "chaos_kill_switch_trips_total",
+    "Times the kill switch tripped because the target became unhealthy",
+)
+
+KILL_SWITCH_HEALTH_CHECKS = Counter(
+    "chaos_kill_switch_health_checks_total",
+    "Target health checks made by the kill switch",
+    ["result"],  # healthy or unhealthy
+)
+
 INJECTION_ACTIVE = Gauge(
     "chaos_injection_active", "Currently active chaos injection", ["failure_type"]
 )

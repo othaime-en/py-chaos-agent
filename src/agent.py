@@ -9,6 +9,7 @@ from .config import load_config, validate_config
 from .metrics import start_metrics_server
 from .resources import apply_settings_and_report
 from .failures.network import reconcile_stale_rules
+from .kill_switch import KillSwitch, KillSwitchOpen
 from .lifecycle import lifecycle
 from .logging_config import (
     setup_logging,
@@ -81,6 +82,19 @@ def main():
         },
     )
 
+    # Kill switch: pause chaos while the target is unhealthy, resume when it
+    # recovers. The standalone agent runs chaos for its whole life, so it is
+    # always "armed".
+    kill_switch = KillSwitch(config.kill_switch)
+    if config.kill_switch.enabled:
+        kill_switch.start_monitoring(
+            lambda: lifecycle.abort_active("kill switch triggered")
+        )
+    else:
+        logger.warning(
+            "Kill switch is disabled: chaos will run without automatic protection"
+        )
+
     # Register signal handlers for graceful shutdown, and run cleanups at
     # interpreter exit as a backstop for exits that bypass the handlers.
     signal.signal(signal.SIGTERM, signal_handler)
@@ -119,9 +133,13 @@ def main():
 
     # Main loop
     iteration = 0
+    paused = False
     while not lifecycle.is_shutting_down():
         try:
             iteration += 1
+            if paused and kill_switch.allows_injection()[0]:
+                logger.info("Kill switch closed, chaos resuming")
+                paused = False
             # Create correlation ID for this iteration
             correlation_id = f"iter-{iteration}-{uuid.uuid4().hex[:8]}"
             set_correlation_id(correlation_id)
@@ -181,12 +199,23 @@ def main():
                         config=cfg,
                     )
 
-                    inject_func(cfg, dry_run=config.agent.dry_run)
+                    with kill_switch.injection(name, config.agent.dry_run):
+                        inject_func(cfg, dry_run=config.agent.dry_run)
                     injections_executed += 1
 
                     log_failure_injection(
                         logger, failure_type=name, action="complete", status="success"
                     )
+
+                except KillSwitchOpen as e:
+                    # Paused, not stopped: skip the rest of this tick and try
+                    # again next interval. Resumes by itself after recovery.
+                    if not paused:
+                        logger.warning(
+                            "Chaos paused by kill switch", extra={"reason": e.reason}
+                        )
+                        paused = True
+                    break
 
                 except Exception as e:
                     logger.error(

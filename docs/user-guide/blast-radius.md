@@ -132,3 +132,6 @@ whole pod) directly, and are bounded by validation rather than by resource limit
 
 For what happens to an injection's effect when the agent stops or is killed, see
 [Shutdown and Cleanup](shutdown-and-cleanup.md).
+
+For stopping chaos automatically when your application becomes unhealthy, see
+[Kill Switch](kill-switch.md).
