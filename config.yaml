@@ -45,23 +45,41 @@ logging:
 
 # Kill switch configuration
 kill_switch:
+  # Automatically pause chaos when the target becomes unhealthy, and resume it
+  # once the target has recovered. Applies to the agent loop, the standalone
+  # agent, and POST /inject/manual. Settings here can only be changed in this
+  # file, never through the API.
   enabled: true
-  
-  # Health check settings
+
+  # Target application health endpoint. Any 2xx response is healthy; a timeout,
+  # connection error, or any other status counts as a failure. Adjust for your
+  # setup (in Kubernetes the sidecar shares the pod network, so localhost works).
+  target_health_url: "http://localhost:8080/health"
   health_check_interval_seconds: 10
+  health_check_timeout_seconds: 2     # must not exceed the interval
+
+  # Trip after this many failed checks in a row
   consecutive_failures_threshold: 3
-  
-  # Grace periods (seconds)
+
+  # Grace periods (seconds). A process kill takes the target down on purpose, so
+  # health checks are skipped after one. The start grace applies each time chaos
+  # becomes active, so a target that is still booting does not trip the switch.
   grace_after_process_kill_seconds: 60
   grace_after_agent_start_seconds: 30
-  
-  # Recovery settings
+
+  # Recovery: after a trip, wait, then require this many healthy checks in a row.
+  # One failed check while testing sends it back to waiting.
   recovery_test_interval_seconds: 120
   recovery_success_threshold: 3
-  
-  # Target application
-  target_health_url: "http://localhost:8080/health"  # Adjust for your setup
-  health_check_timeout_seconds: 2
+
+  # true: chaos resumes by itself after recovery.
+  # false: chaos stays off after a trip until an operator calls
+  #        POST /kill-switch/reset (a standalone agent must be restarted).
+  resume_after_recovery: true
+
+  # false: the API cannot turn the kill switch off (POST /agent/start with
+  # enable_kill_switch=false is refused).
+  allow_api_disable: false
 
 # Safety budget for CPU and memory injections
 #

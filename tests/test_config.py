@@ -242,3 +242,78 @@ class TestSafetySettings:
         config_file.write_text("agent: {}\nfailures: {}\nsafety: {cpu_fraction: 1.0}\n")
         with pytest.raises(ConfigValidationError, match="safety.cpu_fraction"):
             load_config(str(config_file))
+
+
+class TestKillSwitchSettings:
+    def load(self, tmp_path, body):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(body)
+        return load_config(str(config_file))
+
+    def test_defaults_when_section_absent(self, tmp_path):
+        ks = self.load(tmp_path, "agent: {}\nfailures: {}\n").kill_switch
+        assert ks.enabled is True
+        assert ks.target_health_url == "http://localhost:8080/health"
+        assert ks.consecutive_failures_threshold == 3
+        assert ks.resume_after_recovery is True
+        assert ks.allow_api_disable is False
+
+    def test_every_key_is_read_from_the_file(self, tmp_path):
+        ks = self.load(
+            tmp_path,
+            """
+agent: {}
+failures: {}
+kill_switch:
+  enabled: true
+  target_health_url: "http://target-app:9090/ready"
+  health_check_interval_seconds: 7
+  health_check_timeout_seconds: 3
+  consecutive_failures_threshold: 5
+  grace_after_process_kill_seconds: 11
+  grace_after_agent_start_seconds: 12
+  recovery_test_interval_seconds: 13
+  recovery_success_threshold: 4
+  resume_after_recovery: false
+  allow_api_disable: true
+""",
+        ).kill_switch
+        assert ks.target_health_url == "http://target-app:9090/ready"
+        assert ks.health_check_interval_seconds == 7
+        assert ks.health_check_timeout_seconds == 3
+        assert ks.consecutive_failures_threshold == 5
+        assert ks.grace_after_process_kill_seconds == 11
+        assert ks.grace_after_agent_start_seconds == 12
+        assert ks.recovery_test_interval_seconds == 13
+        assert ks.recovery_success_threshold == 4
+        assert ks.resume_after_recovery is False
+        assert ks.allow_api_disable is True
+
+    def test_shipped_config_matches_the_documented_defaults(self):
+        from src.kill_switch import KillSwitchConfig
+
+        shipped = load_config("config.yaml").kill_switch
+        assert shipped == KillSwitchConfig()
+
+    def test_invalid_value_fails_the_load(self, tmp_path):
+        from src.schemas import ConfigValidationError
+
+        with pytest.raises(ConfigValidationError, match="kill_switch"):
+            self.load(
+                tmp_path,
+                "agent: {}\nfailures: {}\nkill_switch: {consecutive_failures_threshold: 0}\n",
+            )
+
+    def test_disabled_kill_switch_produces_a_warning(self, tmp_path):
+        from src.config import validate_config
+
+        config = self.load(
+            tmp_path, "agent: {}\nfailures: {}\nkill_switch: {enabled: false}\n"
+        )
+        assert any("Kill switch is disabled" in w for w in validate_config(config))
+
+    def test_enabled_kill_switch_produces_no_warning(self, tmp_path):
+        from src.config import validate_config
+
+        config = self.load(tmp_path, "agent: {}\nfailures: {}\n")
+        assert validate_config(config) == []

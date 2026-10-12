@@ -9,6 +9,7 @@ import yaml
 from pathlib import Path
 from typing import Any, Dict
 
+from .kill_switch import KillSwitchConfig
 from .resources import SafetySettings
 from .schemas import validate_config_dict
 
@@ -36,6 +37,16 @@ class Config:
         # Parse typed configs
         self.agent = AgentConfig(config_dict.get("agent", {}))
         self.failures = config_dict.get("failures", {})
+        kill_switch = config_dict.get("kill_switch", {})
+        self.kill_switch = KillSwitchConfig(
+            **{
+                k: v
+                for k, v in (
+                    kill_switch if isinstance(kill_switch, dict) else {}
+                ).items()
+                if k in KillSwitchConfig.__dataclass_fields__
+            }
+        )
         safety = config_dict.get("safety", {})
         self.safety = SafetySettings(
             **{
@@ -126,6 +137,12 @@ def validate_config(config: Config) -> list[str]:
             warnings.append(
                 "interval_seconds is greater than 5 minutes, chaos may be infrequent"
             )
+
+    if not config.kill_switch.enabled:
+        warnings.append(
+            "Kill switch is disabled: chaos will keep running even if the target "
+            "becomes unhealthy"
+        )
 
     # Check failure configs
     for name, failure_config in config.failures.items():

@@ -286,13 +286,10 @@ def test_only_configured_failures_appear():
     assert list(out["failures"]) == ["cpu"]
 
 
-def test_logging_and_kill_switch_pass_through_untouched():
+def test_logging_section_passes_through_untouched():
     raw = doc()
     raw["logging"] = {"level": "DEBUG", "anything": {"goes": 1}}
-    raw["kill_switch"] = {"enabled": True, "whatever": 3}
-    out = validate_config_dict(raw)
-    assert out["logging"] == raw["logging"]
-    assert out["kill_switch"] == raw["kill_switch"]
+    assert validate_config_dict(raw)["logging"] == raw["logging"]
 
 
 def test_input_is_not_mutated():
@@ -442,3 +439,146 @@ def test_safety_rejects_unknown_key():
     raw = doc()
     raw["safety"] = {"cpu_fractionn": 0.5}
     assert "safety.cpu_fractionn" in error_paths(raw)
+
+
+# ---------------------------------------------------------------------------
+# kill_switch section
+# ---------------------------------------------------------------------------
+
+
+def ks_doc(**kill_switch):
+    raw = doc()
+    raw["kill_switch"] = kill_switch
+    return raw
+
+
+def test_kill_switch_defaults_are_normalized_in():
+    out = validate_config_dict(doc())["kill_switch"]
+    assert out["enabled"] is True
+    assert out["target_health_url"] == "http://localhost:8080/health"
+    assert out["consecutive_failures_threshold"] == 3
+    assert out["resume_after_recovery"] is True
+    assert out["allow_api_disable"] is False
+
+
+def test_kill_switch_accepts_valid_values():
+    out = validate_config_dict(
+        ks_doc(
+            target_health_url="https://app.internal:8443/healthz",
+            health_check_interval_seconds=5,
+            health_check_timeout_seconds=5,
+            resume_after_recovery=False,
+        )
+    )["kill_switch"]
+    assert out["target_health_url"] == "https://app.internal:8443/healthz"
+    assert out["resume_after_recovery"] is False
+
+
+KS_BOUNDS = [
+    (
+        "health_check_interval_seconds",
+        limits.MIN_KS_INTERVAL_SECONDS,
+        limits.MAX_KS_INTERVAL_SECONDS,
+    ),
+    (
+        "consecutive_failures_threshold",
+        limits.MIN_KS_THRESHOLD,
+        limits.MAX_KS_THRESHOLD,
+    ),
+    (
+        "grace_after_process_kill_seconds",
+        limits.MIN_KS_GRACE_SECONDS,
+        limits.MAX_KS_GRACE_SECONDS,
+    ),
+    (
+        "grace_after_agent_start_seconds",
+        limits.MIN_KS_GRACE_SECONDS,
+        limits.MAX_KS_GRACE_SECONDS,
+    ),
+    (
+        "recovery_test_interval_seconds",
+        limits.MIN_KS_RECOVERY_INTERVAL_SECONDS,
+        limits.MAX_KS_RECOVERY_INTERVAL_SECONDS,
+    ),
+    ("recovery_success_threshold", limits.MIN_KS_THRESHOLD, limits.MAX_KS_THRESHOLD),
+]
+
+
+@pytest.mark.parametrize("key,low,high", KS_BOUNDS)
+def test_kill_switch_numeric_bounds(key, low, high):
+    # An interval of 1 needs a timeout of 1 (the timeout may not exceed it)
+    extra = {"health_check_timeout_seconds": 1}
+    for ok in (low, high):
+        validate_config_dict(ks_doc(**{key: ok, **extra}))
+    for bad in (low - 1, high + 1):
+        assert f"kill_switch.{key}" in error_paths(ks_doc(**{key: bad, **extra}))
+
+
+def test_kill_switch_timeout_bounds():
+    validate_config_dict(ks_doc(health_check_timeout_seconds=1))
+    for bad in (0, limits.MAX_KS_TIMEOUT_SECONDS + 1):
+        assert "kill_switch.health_check_timeout_seconds" in error_paths(
+            ks_doc(health_check_timeout_seconds=bad)
+        )
+
+
+def test_kill_switch_timeout_may_not_exceed_the_interval():
+    assert "kill_switch" in error_paths(
+        ks_doc(health_check_interval_seconds=2, health_check_timeout_seconds=3)
+    )
+    validate_config_dict(
+        ks_doc(health_check_interval_seconds=3, health_check_timeout_seconds=3)
+    )
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "",
+        "   ",
+        "localhost:8080/health",
+        "ftp://host/health",
+        "file:///etc/passwd",
+        "javascript:alert(1)",
+        "http://",
+        "http:///path",
+        "http://user:pass@host/health",
+        "http://host/he alth",
+        "http://host/" + "a" * limits.MAX_HEALTH_URL_LENGTH,
+    ],
+)
+def test_kill_switch_rejects_bad_urls(url):
+    assert "kill_switch.target_health_url" in error_paths(ks_doc(target_health_url=url))
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://localhost:8080/health",
+        "https://svc.ns.svc.cluster.local/healthz",
+        "http://10.0.0.5:9000/",
+        "http://[::1]:8080/health",
+    ],
+)
+def test_kill_switch_accepts_normal_urls(url):
+    assert validate_config_dict(ks_doc(target_health_url=url))
+
+
+@pytest.mark.parametrize(
+    "key,bad",
+    [
+        ("enabled", "true"),
+        ("enabled", 1),
+        ("resume_after_recovery", "yes"),
+        ("allow_api_disable", 0),
+        ("consecutive_failures_threshold", "3"),
+        ("consecutive_failures_threshold", 3.0),
+        ("consecutive_failures_threshold", True),
+    ],
+)
+def test_kill_switch_strict_types(key, bad):
+    assert f"kill_switch.{key}" in error_paths(ks_doc(**{key: bad}))
+
+
+def test_kill_switch_rejects_unknown_keys():
+    assert "kill_switch.threshold" in error_paths(ks_doc(threshold=3))
