@@ -207,13 +207,17 @@ volumeMounts:
 
 ### Self-Protection
 
-The process killer includes logic to avoid terminating itself:
+The process killer never targets the agent or anything that could take it down:
 
-1. Records own PID and parent PID
-2. Scans for all child processes
-3. Adds all to protected list
-4. Filters out any process matching "chaos" or "agent.py" in command line
-5. Only targets processes not in protected list
+1. Records its own PID and parent PID
+2. Adds every ancestor and every descendant to the protected set
+3. Skips zombies, kernel threads (no command line), and critical system
+   processes (matched on the executable name as a whole word)
+4. Never signals PID 1 of the shared PID namespace
+5. Only considers processes that match `target_name` exactly (or `target_pid`)
+
+It then kills exactly one process, chosen by start time. See
+[Process Targeting](process-targeting.md).
 
 ### Cleanup on Exit
 

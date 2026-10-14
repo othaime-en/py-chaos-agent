@@ -10,6 +10,11 @@ services:
       - "127.0.0.1:8000:8000"
       - "127.0.0.1:9000:9000"
     restart: always
+    # Run under an init (tini). Without it the app is PID 1 of the namespace the
+    # chaos agent shares, and PID 1 cannot be killed from inside that namespace
+    # (the kernel discards the signal), so the process failure would be refused.
+    # With it, tini is PID 1 and the app is PID 2.
+    init: true
     cpus: 1.0
     mem_limit: 256m
 
@@ -19,6 +24,10 @@ services:
       dockerfile: docker/Dockerfile
     network_mode: "service:target-app"
     pid: "service:target-app"
+    # When the target's init exits (for example after a process kill), the kernel
+    # tears down the shared PID namespace and kills everything in it, including
+    # this agent. Restart it along with the target.
+    restart: always
     # Least privilege: no `privileged: true`. NET_ADMIN is needed for `tc`
     # latency injection, KILL for signalling the target process.
     # Resource limits are the blast-radius boundary for CPU and memory

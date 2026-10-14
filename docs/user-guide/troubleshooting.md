@@ -187,11 +187,17 @@ kubectl logs -n chaos-demo <pod-name> -c chaos-agent -f
 [PROCESS] No killable process named 'myapp' found
 ```
 
+If processes are visible but nothing matches, the name probably is not an exact
+match. `target_name` is matched exactly, not as a substring, and never against
+command-line arguments. See [Process Targeting](process-targeting.md). If you see
+`Refusing to kill PID 1`, the target is PID 1 of a shared namespace (Docker
+Compose without `init: true`).
+
 #### Diagnosis
 
 ```bash
-# Check what processes are visible
-kubectl exec -n chaos-demo <pod-name> -c chaos-agent -- ps aux
+# Check what processes are visible, and the exact names to use
+kubectl exec -n chaos-demo <pod-name> -c chaos-agent -- ps -eo pid,comm,args
 
 # If you don't see target app processes, check shareProcessNamespace
 kubectl get pod -n chaos-demo <pod-name> -o yaml | grep shareProcessNamespace
