@@ -19,7 +19,7 @@ Rules, applied uniformly:
 
 import re
 from urllib.parse import urlparse
-from typing import Annotated, Any, Dict, List, Mapping, Optional, Type
+from typing import Annotated, Any, Dict, List, Literal, Mapping, Optional, Type
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from pydantic import model_validator
@@ -93,7 +93,19 @@ class MemoryFailureConfig(_FailureBase):
 
 
 class ProcessFailureConfig(_FailureBase):
+    """
+    Kill exactly one process.
+
+    ``target_name`` is matched EXACTLY against process names (never as a
+    substring, never against arguments). ``target_pid`` selects one specific
+    process; with both, the process must match both. ``target_selection``
+    decides which one when several match.
+    """
+
     target_name: Optional[str] = None
+    # PID 1 is never a valid target, so the lowest useful PID is 2
+    target_pid: Optional[int] = Field(default=None, ge=2)
+    target_selection: Literal["oldest", "newest"] = "oldest"
 
     @field_validator("target_name")
     @classmethod
@@ -116,8 +128,10 @@ class ProcessFailureConfig(_FailureBase):
 
     @model_validator(mode="after")
     def _require_target_when_enabled(self) -> "ProcessFailureConfig":
-        if self.enabled and not self.target_name:
-            raise ValueError("target_name is required when process failure is enabled")
+        if self.enabled and not self.target_name and self.target_pid is None:
+            raise ValueError(
+                "target_name or target_pid is required when process failure is enabled"
+            )
         return self
 
 

@@ -120,7 +120,15 @@ failures:
   process:
     enabled: false    # Disabled by default (dangerous!)
     probability: 0.1  # 10% chance each interval
-    target_name: "target-app"  # MUST be a specific process name
+    # Kills exactly ONE process. The name must match EXACTLY (case-insensitive):
+    # the process name, the executable, or for `python app.py` / `java -jar
+    # app.jar` the script or jar name. It is never a substring and never matches
+    # command-line arguments, so "target-app" does not match `tail -f target-app.log`.
+    target_name: "target-app"
+    # When several processes match: "oldest" (default; usually the parent or
+    # master) or "newest" (usually the latest worker).
+    target_selection: oldest
+    # target_pid: 1234   # optional: one exact PID (mostly for manual injections)
 
   # Network latency injection
   network:
