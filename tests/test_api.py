@@ -1097,3 +1097,56 @@ class TestKillSwitchWiring:
             == 200
         )
         assert isinstance(ks, KillSwitch)
+
+
+class TestProcessTargetingApi:
+    """Manual process injections validate their targeting options."""
+
+    def test_pid_1_is_rejected_up_front(self, client, monkeypatch):
+        called = []
+        monkeypatch.setattr("src.api.inject_process", lambda *a, **k: called.append(1))
+        response = client.post(
+            "/inject/manual",
+            json={"failure_type": "process", "config": {"target_pid": 1}},
+        )
+        assert response.status_code == 422
+        assert response.json()["detail"][0]["loc"] == ["process", "target_pid"]
+        assert called == []
+
+    def test_unknown_selection_is_rejected(self, client):
+        response = client.post(
+            "/inject/manual",
+            json={"failure_type": "process", "config": {"target_selection": "random"}},
+        )
+        assert response.status_code == 422
+
+    def test_pid_override_is_merged_onto_the_stored_target(self, client, monkeypatch):
+        seen = []
+        monkeypatch.setattr(
+            "src.api.inject_process", lambda cfg, dry_run=False: seen.append(cfg)
+        )
+        response = client.post(
+            "/inject/manual",
+            json={"failure_type": "process", "config": {"target_pid": 4242}},
+        )
+        assert response.status_code == 200
+        assert seen[0]["target_pid"] == 4242
+        # the stored name is kept, so the process must match both
+        assert (
+            seen[0]["target_name"]
+            == agent_state.config.failures["process"]["target_name"]
+        )
+        assert seen[0]["target_selection"] == "oldest"
+
+    def test_selection_can_be_changed_with_patch(self, client):
+        response = client.patch(
+            "/config/failures/process", json={"target_selection": "newest"}
+        )
+        assert response.status_code == 200
+        assert agent_state.config.failures["process"]["target_selection"] == "newest"
+
+    def test_broad_names_are_still_refused(self, client):
+        response = client.patch(
+            "/config/failures/process", json={"target_name": "python"}
+        )
+        assert response.status_code == 422

@@ -48,6 +48,7 @@ Hard limits (defined in `src/limits.py`):
 | `network.delay_ms` | 1 | 10000 |
 | `network.interface` | 1 to 15 characters: letters, digits, `. _ : -` | |
 | `process.target_name` | 3 to 128 characters: letters, digits, `. _ @ + : -`; broad names like `python` are refused | |
+| `process.target_pid` | 2 or higher | |
 
 The injectors also enforce the upper limits themselves, so code that bypasses
 config loading and the API still cannot start unbounded load.
@@ -305,7 +306,8 @@ memory:
 
 ## Process Failure
 
-Terminates target processes by name or command line.
+Terminates one process, chosen by exact name. See
+[Process Targeting](../user-guide/process-targeting.md) for the full rules.
 
 ### Configuration
 
@@ -315,6 +317,7 @@ failures:
     enabled: true
     probability: 0.3
     target_name: "target-app"
+    target_selection: oldest
 ```
 
 ### Parameters
@@ -322,29 +325,48 @@ failures:
 #### `target_name`
 
 **Type:** String  
-**Required:** Yes  
-**Description:** Name or substring to match against process names or command lines.
+**Required:** Yes, unless `target_pid` is set  
+**Description:** The exact name of the process to kill (case-insensitive).
 
 **Examples:**
 
 ```yaml
-target_name: "my_app"        # Kills my_app process
-target_name: "api_server"       # Kill API servere
-target_name: "target-app"   # Kill specific app
+target_name: "my_app"       # a process, executable or script named my_app
+target_name: "api_server"   # python -m api_server, or a script api_server.py
+target_name: "target-app"   # `python target-app.py`
 ```
 
 **Matching behavior:**
 
-- Case-insensitive substring matching
-- Matches against process name (e.g., `python3`)
-- Also matches against command line arguments
-- First matching process is terminated
+- Exact match, never a substring
+- Against the process name, the executable, and `argv[0]`
+- For interpreters (`python`, `java`, `node`, ...), also the script, module or jar
+  name, with or without its extension
+- Never against other command-line arguments, so `tail -f target-app.log` does not
+  match `target-app`
+
+#### `target_selection`
+
+**Type:** `oldest` or `newest`  
+**Default:** `oldest`  
+**Description:** Which process to kill when several match. `oldest` is the one that
+started first (usually the parent or master); `newest` the one that started last.
+Exactly one process is killed, and the choice does not depend on OS ordering.
+
+#### `target_pid`
+
+**Type:** Integer, 2 or higher  
+**Default:** none  
+**Description:** One exact PID. With `target_name` also set, the process must match
+both. PIDs change between runs, so this is mainly for manual injections.
 
 **Safety mechanisms:**
 
-- Chaos agent never kills itself
-- Protected PIDs: agent process, parent, and all children
-- Processes with "chaos" or "agent.py" in command line are excluded
+- The agent never kills itself, its ancestors, or its descendants
+- Critical system processes are never killed (matched on the executable name, as a
+  whole word)
+- PID 1 of the shared PID namespace is never killed
+- Zombies and kernel threads are skipped
 
 ### Termination Process
 
@@ -352,6 +374,7 @@ target_name: "target-app"   # Kill specific app
 2. Wait up to 3 seconds for termination
 3. If still running, send SIGKILL (forced termination)
 4. Wait up to 2 seconds for confirmation
+5. Count it as a success only if the process is actually gone
 
 ### Security Considerations
 

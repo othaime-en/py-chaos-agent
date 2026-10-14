@@ -582,3 +582,58 @@ def test_kill_switch_strict_types(key, bad):
 
 def test_kill_switch_rejects_unknown_keys():
     assert "kill_switch.threshold" in error_paths(ks_doc(threshold=3))
+
+
+# ---------------------------------------------------------------------------
+# process targeting options
+# ---------------------------------------------------------------------------
+
+
+def test_process_target_options_default_sensibly():
+    out = validate_failure_config("process", {"target_name": "my-app"})
+    assert out["target_pid"] is None
+    assert out["target_selection"] == "oldest"
+
+
+@pytest.mark.parametrize("selection", ["oldest", "newest"])
+def test_process_selection_accepts_known_values(selection):
+    out = validate_failure_config(
+        "process", {"target_name": "my-app", "target_selection": selection}
+    )
+    assert out["target_selection"] == selection
+
+
+@pytest.mark.parametrize("bad", ["random", "first", "OLDEST", "", None, 1, True])
+def test_process_selection_rejects_everything_else(bad):
+    with pytest.raises(ConfigValidationError):
+        validate_failure_config(
+            "process", {"target_name": "my-app", "target_selection": bad}
+        )
+
+
+def test_process_pid_accepts_pid_2_and_up():
+    assert validate_failure_config("process", {"target_pid": 2})["target_pid"] == 2
+    assert validate_failure_config("process", {"target_pid": 4194304})["target_pid"]
+
+
+@pytest.mark.parametrize("bad", [1, 0, -1, True, "5", 5.0, [2]])
+def test_process_pid_rejects_pid_1_and_non_integers(bad):
+    with pytest.raises(ConfigValidationError):
+        validate_failure_config("process", {"target_pid": bad})
+
+
+def test_enabled_process_failure_accepts_a_pid_instead_of_a_name():
+    out = validate_failure_config("process", {"enabled": True, "target_pid": 4242})
+    assert out["target_pid"] == 4242 and out["target_name"] is None
+
+
+def test_enabled_process_failure_still_needs_a_name_or_a_pid():
+    with pytest.raises(ConfigValidationError, match="target_name or target_pid"):
+        validate_failure_config("process", {"enabled": True})
+
+
+def test_process_name_and_pid_together_are_allowed():
+    out = validate_failure_config(
+        "process", {"enabled": True, "target_name": "my-app", "target_pid": 99}
+    )
+    assert out["target_name"] == "my-app" and out["target_pid"] == 99
