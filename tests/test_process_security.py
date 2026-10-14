@@ -226,8 +226,11 @@ class TestCriticalProcessProtection:
 
         monkeypatch.setattr(psutil, "Process", lambda pid: MockProcess())
 
-        # Search for a broad term that would match multiple processes
-        result = get_safe_target_processes("target")
+        # The match is exact, so a broad term matches nothing...
+        assert get_safe_target_processes("target") == []
+
+        # ...and the exact name finds only the non-critical process
+        result = get_safe_target_processes("target-app")
 
         # Check logs for critical process skipping
         log_messages = " ".join([record.message for record in caplog.records])
