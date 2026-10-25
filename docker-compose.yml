@@ -50,7 +50,7 @@ services:
       - chaos-logs:/var/log/chaos-agent
     environment:
       - LOG_LEVEL=INFO
-      - JSON_LOGS=true
+      - LOG_FORMAT=json
       - LOG_FILE=/var/log/chaos-agent/agent.log
       # Reachable through the published (loopback-only) host port above.
       - CHAOS_API_HOST=0.0.0.0

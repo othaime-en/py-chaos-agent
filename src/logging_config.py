@@ -15,7 +15,7 @@ import logging.handlers
 import json
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 import threading
 
@@ -57,7 +57,7 @@ class StructuredFormatter(logging.Formatter):
     def _format_json(self, record: logging.LogRecord) -> str:
         """Format as JSON for machine parsing."""
         log_data: Dict[str, Any] = {
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "level": record.levelname,
             "logger": record.name,
             "message": record.getMessage(),
@@ -184,6 +184,18 @@ def clear_correlation_id():
         delattr(_thread_local, "correlation_id")
 
 
+def _legacy_json_logs() -> Optional[str]:
+    """
+    'json' if the deprecated JSON_LOGS variable is set to a true value.
+
+    The Dockerfile, Compose file and Kubernetes manifest used to set JSON_LOGS
+    while this module only read LOG_FORMAT, so JSON logging was never enabled.
+    Honoring the old name gives anyone who set it the behavior they expected.
+    """
+    value = os.environ.get("JSON_LOGS", "").strip().lower()
+    return "json" if value in ("true", "1", "yes") else None
+
+
 def setup_logging(config: Optional[Dict[str, Any]] = None) -> None:
     """
     Configure application-wide logging.
@@ -208,6 +220,8 @@ def setup_logging(config: Optional[Dict[str, Any]] = None) -> None:
     Environment Variables (overrides):
         LOG_LEVEL: Override log level
         LOG_FORMAT: Override format ('json' or 'text')
+        JSON_LOGS: Deprecated alias. A true value ('true', '1', 'yes') selects
+            JSON, unless LOG_FORMAT is set. Use LOG_FORMAT=json instead.
         LOG_FILE: Override log file path
         ENABLE_FILE_LOGGING: Override file logging (true/false)
         ENABLE_CONSOLE_LOGGING: Override console logging (true/false)
@@ -258,8 +272,10 @@ def setup_logging(config: Optional[Dict[str, Any]] = None) -> None:
     log_level = os.environ.get("LOG_LEVEL") or get_config("level", defaults["level"])
     log_level = log_level.upper()
 
-    log_format = os.environ.get("LOG_FORMAT") or get_config(
-        "format", defaults["format"]
+    log_format = (
+        os.environ.get("LOG_FORMAT")
+        or _legacy_json_logs()
+        or get_config("format", defaults["format"])
     )
     log_format = log_format.lower()
     json_logs = log_format == "json"
