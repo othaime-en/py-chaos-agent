@@ -259,3 +259,54 @@ class TestReconcileStaleRules:
 
         monkeypatch.setattr(network, "_run_cmd", deny)
         assert network.reconcile_stale_rules(["eth0"]) == []
+
+
+class TestSuccessIsCountedWhenTheInjectionFinishes:
+    """It used to be counted the moment the rule was applied, so an injection
+    that was then aborted (or never finished) still counted as a success."""
+
+    def test_nothing_is_counted_while_the_rule_is_still_held(self, tc):
+        t = run_in_thread()
+        wait_until(lambda: "eth0" in tc.rules)
+        assert count("success") == 0
+        assert count("aborted") == 0
+        lifecycle.abort_active()
+        t.join(5)
+
+    def test_running_to_the_end_counts_as_success(self, tc):
+        network.inject_network({**CFG, "duration_seconds": 0})
+        assert count("success") == 1
+        assert count("aborted") == 0
+
+    def test_an_abort_counts_as_aborted_not_success(self, tc):
+        t = run_in_thread()
+        wait_until(lambda: "eth0" in tc.rules)
+        lifecycle.abort_active("test")
+        t.join(5)
+        assert count("aborted") == 1
+        assert count("success") == 0
+
+    def test_a_shutdown_counts_as_aborted_not_success(self, tc):
+        t = run_in_thread()
+        wait_until(lambda: "eth0" in tc.rules)
+        lifecycle.shutdown("test")
+        t.join(5)
+        assert count("aborted") == 1
+        assert count("success") == 0
+
+    def test_a_failure_to_apply_counts_only_as_failed(self, tc, monkeypatch):
+        original = tc.__call__
+
+        def failing(args):
+            if args[2] == "add":
+                return subprocess.CompletedProcess(args, 1, "", "no netem")
+            return original(args)
+
+        monkeypatch.setattr(network, "_run_cmd", failing)
+        network.inject_network({**CFG, "duration_seconds": 0})
+        assert (count("success"), count("aborted"), count("failed")) == (0, 0, 1)
+
+    def test_each_injection_is_counted_exactly_once(self, tc):
+        for _ in range(3):
+            network.inject_network({**CFG, "duration_seconds": 0})
+        assert count("success") == 3
