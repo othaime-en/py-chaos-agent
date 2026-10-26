@@ -23,11 +23,11 @@ from src.failures.process import (
     select_target,
     terminate_process,
 )
-from src.metrics import INJECTIONS_TOTAL
+from src.metrics import INJECTIONS_TOTAL, metric_value
 
 
 def count(status):
-    return INJECTIONS_TOTAL.labels(failure_type="process", status=status)._value.get()
+    return metric_value(INJECTIONS_TOTAL, failure_type="process", status=status)
 
 
 class FakeProc:

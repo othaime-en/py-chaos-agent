@@ -18,7 +18,7 @@ import psutil
 import pytest
 
 from src.failures.process import find_target_processes, inject_process, select_target
-from src.metrics import INJECTIONS_TOTAL
+from src.metrics import INJECTIONS_TOTAL, metric_value
 
 # Real processes with real start-time gaps: slower than unit tests.
 # Skip with: pytest -m "not slow"
@@ -32,7 +32,7 @@ pytestmark = [
 
 
 def count(status):
-    return INJECTIONS_TOTAL.labels(failure_type="process", status=status)._value.get()
+    return metric_value(INJECTIONS_TOTAL, failure_type="process", status=status)
 
 
 def gone(pid):

@@ -12,7 +12,7 @@ import os
 import threading
 import time
 import random
-from datetime import datetime
+from datetime import datetime, timezone
 from contextlib import asynccontextmanager, nullcontext
 
 from .auth import auth_disabled, get_expected_token, require_auth
@@ -31,7 +31,12 @@ from .failures.memory import inject_memory
 from .failures.process import inject_process
 from .failures.network import inject_network
 from .logging_config import get_logger, set_correlation_id
-from .metrics import INJECTIONS_TOTAL, INJECTION_ACTIVE
+from .metrics import (
+    INJECTIONS_TOTAL,
+    INJECTION_ACTIVE,
+    metric_value,
+    reset_metrics as clear_injection_metrics,
+)
 from .kill_switch import KillSwitch, KillSwitchOpen
 
 logger = get_logger(__name__)
@@ -818,27 +823,22 @@ async def get_metrics_summary():
     summary = {}
 
     for failure_type in ["cpu", "memory", "process", "network"]:
-        success = INJECTIONS_TOTAL.labels(
-            failure_type=failure_type, status="success"
-        )._value.get()
-        failed = INJECTIONS_TOTAL.labels(
-            failure_type=failure_type, status="failed"
-        )._value.get()
-        skipped = INJECTIONS_TOTAL.labels(
-            failure_type=failure_type, status="skipped"
-        )._value.get()
-        active = INJECTION_ACTIVE.labels(failure_type=failure_type)._value.get()
+        counts = {
+            status: metric_value(
+                INJECTIONS_TOTAL, failure_type=failure_type, status=status
+            )
+            for status in ("success", "aborted", "failed", "skipped")
+        }
+        active = metric_value(INJECTION_ACTIVE, failure_type=failure_type)
 
         summary[failure_type] = {
-            "success": success,
-            "failed": failed,
-            "skipped": skipped,
+            **counts,
             "active": active,
-            "total": success + failed + skipped,
+            "total": sum(counts.values()),
         }
 
     return {
-        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "metrics": summary,
     }
 
@@ -848,8 +848,7 @@ async def reset_metrics():
     """Reset all metrics counters (useful for testing)."""
     logger.warning("Metrics reset requested via API")
 
-    INJECTIONS_TOTAL._metrics.clear()
-    INJECTION_ACTIVE._metrics.clear()
+    clear_injection_metrics()
 
     return {
         "status": "reset",

@@ -8,7 +8,7 @@ import pytest
 
 from src.failures import network
 from src.lifecycle import lifecycle
-from src.metrics import INJECTIONS_TOTAL
+from src.metrics import INJECTIONS_TOTAL, metric_value
 
 
 class FakeTc:
@@ -56,7 +56,7 @@ def tc(monkeypatch):
 
 
 def count(status):
-    return INJECTIONS_TOTAL.labels(failure_type="network", status=status)._value.get()
+    return metric_value(INJECTIONS_TOTAL, failure_type="network", status=status)
 
 
 CFG = {"interface": "eth0", "delay_ms": 100, "duration_seconds": 30}

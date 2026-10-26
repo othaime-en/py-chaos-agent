@@ -10,7 +10,7 @@ from src.failures.cpu import inject_cpu
 from src.failures.memory import inject_memory
 from src.failures.process import inject_process, get_safe_target_processes
 from src.failures.network import inject_network, cleanup_network_rules
-from src.metrics import INJECTIONS_TOTAL, INJECTION_ACTIVE
+from src.metrics import INJECTIONS_TOTAL, INJECTION_ACTIVE, metric_value
 
 
 class TestCPUFailures:
@@ -32,10 +32,7 @@ class TestCPUFailures:
         cpu_records = [r for r in caplog.records if "CPU injection" in r.message]
         assert len(cpu_records) > 0
         # Verify the injection happened (metrics check is sufficient)
-        assert (
-            INJECTIONS_TOTAL.labels(failure_type="cpu", status="skipped")._value.get()
-            == 1
-        )
+        assert metric_value(INJECTIONS_TOTAL, failure_type="cpu", status="skipped") == 1
 
     def test_inject_cpu_actual(self, caplog):
         """Test actual CPU injection (brief to avoid slowdown)."""
@@ -51,10 +48,7 @@ class TestCPUFailures:
         # Check for CPU stress messages in logs
         assert any("CPU stress" in record.message for record in caplog.records)
         assert duration >= 1  # Should take at least 1 second
-        assert (
-            INJECTIONS_TOTAL.labels(failure_type="cpu", status="success")._value.get()
-            == 1
-        )
+        assert metric_value(INJECTIONS_TOTAL, failure_type="cpu", status="success") == 1
 
     def test_inject_cpu_default_cores(self, caplog):
         """Test CPU injection with default cores value."""
@@ -72,14 +66,11 @@ class TestCPUFailures:
         inject_cpu(config, dry_run=False)
 
         # After completion, active should be back to 0
-        final_active = INJECTION_ACTIVE.labels(failure_type="cpu")._value.get()
+        final_active = metric_value(INJECTION_ACTIVE, failure_type="cpu")
         assert final_active == 0
 
         # Success counter should have incremented
-        assert (
-            INJECTIONS_TOTAL.labels(failure_type="cpu", status="success")._value.get()
-            == 1
-        )
+        assert metric_value(INJECTIONS_TOTAL, failure_type="cpu", status="success") == 1
 
     def test_cpu_zero_duration(self, caplog):
         """Test CPU injection with zero duration."""
@@ -95,20 +86,14 @@ class TestCPUFailures:
         config = {"duration_seconds": 1, "cores": 1}
 
         # Before injection
-        assert INJECTION_ACTIVE.labels(failure_type="cpu")._value.get() == 0
-        assert (
-            INJECTIONS_TOTAL.labels(failure_type="cpu", status="success")._value.get()
-            == 0
-        )
+        assert metric_value(INJECTION_ACTIVE, failure_type="cpu") == 0
+        assert metric_value(INJECTIONS_TOTAL, failure_type="cpu", status="success") == 0
 
         inject_cpu(config, dry_run=False)
 
         # After successful injection
-        assert INJECTION_ACTIVE.labels(failure_type="cpu")._value.get() == 0
-        assert (
-            INJECTIONS_TOTAL.labels(failure_type="cpu", status="success")._value.get()
-            == 1
-        )
+        assert metric_value(INJECTION_ACTIVE, failure_type="cpu") == 0
+        assert metric_value(INJECTIONS_TOTAL, failure_type="cpu", status="success") == 1
 
 
 class TestMemoryFailures:
@@ -124,10 +109,7 @@ class TestMemoryFailures:
         assert any("DRY RUN" in record.message for record in caplog.records)
         assert any("Memory injection" in record.message for record in caplog.records)
         assert (
-            INJECTIONS_TOTAL.labels(
-                failure_type="memory", status="skipped"
-            )._value.get()
-            == 1
+            metric_value(INJECTIONS_TOTAL, failure_type="memory", status="skipped") == 1
         )
 
     @pytest.mark.parametrize("mb", [10, 50, 100])
@@ -153,10 +135,7 @@ class TestMemoryFailures:
 
         # Check that it eventually completes
         assert (
-            INJECTIONS_TOTAL.labels(
-                failure_type="memory", status="success"
-            )._value.get()
-            == 1
+            metric_value(INJECTIONS_TOTAL, failure_type="memory", status="success") == 1
         )
 
     def test_inject_memory_default_value(self, caplog):
@@ -222,9 +201,7 @@ class TestProcessFailures:
         # Should report no process found
         assert any("No killable process" in record.message for record in caplog.records)
         assert (
-            INJECTIONS_TOTAL.labels(
-                failure_type="process", status="skipped"
-            )._value.get()
+            metric_value(INJECTIONS_TOTAL, failure_type="process", status="skipped")
             == 1
         )
 
@@ -281,9 +258,7 @@ class TestNetworkFailures:
         assert any("DRY RUN" in record.message for record in caplog.records)
         assert any("Network" in record.message for record in caplog.records)
         assert (
-            INJECTIONS_TOTAL.labels(
-                failure_type="network", status="skipped"
-            )._value.get()
+            metric_value(INJECTIONS_TOTAL, failure_type="network", status="skipped")
             == 1
         )
         # Should not execute any commands in dry run
@@ -309,9 +284,7 @@ class TestNetworkFailures:
             for record in caplog.records
         )
         assert (
-            INJECTIONS_TOTAL.labels(
-                failure_type="network", status="success"
-            )._value.get()
+            metric_value(INJECTIONS_TOTAL, failure_type="network", status="success")
             == 1
         )
 
@@ -331,10 +304,7 @@ class TestNetworkFailures:
         # Check for failure message
         assert any("failed" in record.message.lower() for record in caplog.records)
         assert (
-            INJECTIONS_TOTAL.labels(
-                failure_type="network", status="failed"
-            )._value.get()
-            == 1
+            metric_value(INJECTIONS_TOTAL, failure_type="network", status="failed") == 1
         )
 
     @patch("src.failures.network._run_cmd")

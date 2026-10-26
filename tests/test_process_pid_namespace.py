@@ -56,7 +56,7 @@ import json, logging, sys
 sys.path.insert(0, {repo!r})
 import warnings; warnings.filterwarnings("ignore")
 from src.failures.process import inject_process
-from src.metrics import INJECTIONS_TOTAL
+from src.metrics import INJECTIONS_TOTAL, metric_value
 
 records = []
 class Capture(logging.Handler):
@@ -71,7 +71,7 @@ proc_logger.addHandler(Capture())
 config = json.loads(sys.argv[1])
 dry_run = sys.argv[2] == "dry"
 inject_process(config, dry_run=dry_run)
-count = lambda s: INJECTIONS_TOTAL.labels(failure_type="process", status=s)._value.get()
+count = lambda s: metric_value(INJECTIONS_TOTAL, failure_type="process", status=s)
 print("RESULT " + json.dumps({{
     "success": count("success"), "failed": count("failed"),
     "skipped": count("skipped"), "dry_run_records": records,

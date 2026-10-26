@@ -9,7 +9,7 @@ import threading
 import pytest
 
 from src.failures import cpu, memory
-from src.metrics import INJECTIONS_CLAMPED, INJECTIONS_TOTAL
+from src.metrics import INJECTIONS_CLAMPED, INJECTIONS_TOTAL, metric_value
 from src.resources import MIB, CgroupInfo, SafetySettings, governor
 
 
@@ -31,11 +31,11 @@ def set_container(
 
 
 def counter(kind, status):
-    return INJECTIONS_TOTAL.labels(failure_type=kind, status=status)._value.get()
+    return metric_value(INJECTIONS_TOTAL, failure_type=kind, status=status)
 
 
 def clamped(kind):
-    return INJECTIONS_CLAMPED.labels(failure_type=kind)._value.get()
+    return metric_value(INJECTIONS_CLAMPED, failure_type=kind)
 
 
 def reserved():

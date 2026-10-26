@@ -6,7 +6,7 @@ import time
 import pytest
 
 from src.lifecycle import Lifecycle
-from src.metrics import INJECTIONS_TOTAL
+from src.metrics import INJECTIONS_TOTAL, metric_value
 
 
 @pytest.fixture
@@ -15,7 +15,7 @@ def lc():
 
 
 def skipped(kind):
-    return INJECTIONS_TOTAL.labels(failure_type=kind, status="skipped")._value.get()
+    return metric_value(INJECTIONS_TOTAL, failure_type=kind, status="skipped")
 
 
 class TestGuard:
