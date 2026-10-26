@@ -9,6 +9,7 @@ from .config import load_config, validate_config
 from .metrics import start_metrics_server
 from .resources import apply_settings_and_report
 from .failures.network import reconcile_stale_rules
+from .chance import should_inject
 from .kill_switch import KillSwitch, KillSwitchOpen
 from .lifecycle import lifecycle
 from .logging_config import (
@@ -162,7 +163,7 @@ def main():
                 probability = cfg["probability"]
                 roll = random.random()
 
-                if roll > probability:
+                if not should_inject(probability, roll):
                     logger.debug(
                         "Probability check failed, skipping injection",
                         extra={

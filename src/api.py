@@ -16,6 +16,7 @@ from datetime import datetime
 from contextlib import asynccontextmanager, nullcontext
 
 from .auth import auth_disabled, get_expected_token, require_auth
+from .chance import should_inject
 from . import limits
 from .config import Config, load_config, validate_config
 from .failures.network import reconcile_stale_rules
@@ -287,7 +288,7 @@ def run_agent_loop():
                     continue
 
                 probability = cfg["probability"]
-                if random.random() > probability:
+                if not should_inject(probability, random.random()):
                     continue
 
                 logger.info(
