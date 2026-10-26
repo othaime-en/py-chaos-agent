@@ -20,6 +20,7 @@ class AgentConfig:
     def __init__(self, config: dict):
         self.interval_seconds = config.get("interval_seconds", 10)
         self.dry_run = config.get("dry_run", False)
+        self.auto_start = config.get("auto_start", False)
 
 
 class Config:

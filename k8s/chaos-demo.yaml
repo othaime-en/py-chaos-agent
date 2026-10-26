@@ -13,6 +13,9 @@ data:
     agent:
       interval_seconds: 15
       dry_run: false
+      # The demo's purpose is to inject chaos, so start as soon as the API is up.
+      # Without this, nothing happens until POST /agent/start.
+      auto_start: true
 
     # Injections are held to a fraction of the chaos-agent container's own
     # CPU and memory limits (see resources: below). require_cgroup_limits makes

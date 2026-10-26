@@ -112,6 +112,14 @@ def _active_kill_switch() -> Optional[KillSwitch]:
     return ks if ks is not None and ks.config.enabled else None
 
 
+def _begin_agent_loop() -> None:
+    """Start the agent loop thread. Used by POST /agent/start and auto_start."""
+    agent_state.stop_event.clear()
+    agent_state.enabled = True
+    agent_state.agent_thread = threading.Thread(target=run_agent_loop, daemon=True)
+    agent_state.agent_thread.start()
+
+
 def _validation_error(exc: ConfigValidationError) -> HTTPException:
     """
     Turn a ConfigValidationError into a 422 using FastAPI's own error shape
@@ -137,6 +145,12 @@ async def lifespan(app: FastAPI):
         # Repair a netem rule left by a previous run that was SIGKILLed.
         if "network" in config.failures:
             reconcile_stale_rules([config.failures["network"].get("interface", "eth0")])
+
+        # Opt-in: begin injecting without waiting for POST /agent/start. The kill
+        # switch and safety settings above are already in place.
+        if config.agent.auto_start:
+            logger.info("Starting chaos agent automatically (agent.auto_start)")
+            _begin_agent_loop()
     except Exception as e:
         logger.error(f"Failed to load config on startup: {e}")
         agent_state.config = None
@@ -429,10 +443,7 @@ async def start_agent(enable_kill_switch: Optional[bool] = None):
     if agent_state.kill_switch is None:
         apply_kill_switch_config(config)
 
-    agent_state.stop_event.clear()
-    agent_state.enabled = True
-    agent_state.agent_thread = threading.Thread(target=run_agent_loop, daemon=True)
-    agent_state.agent_thread.start()
+    _begin_agent_loop()
 
     ks = _active_kill_switch()
     return {
@@ -784,20 +795,31 @@ async def update_failure_config(
 async def reload_config():
     """Reload configuration from config.yaml file."""
     try:
+        previous = agent_state.config
         config = load_config()
         agent_state.config = config
         apply_settings_and_report(config.safety)
         apply_kill_switch_config(config)
         logger.info("Configuration reloaded from file")
 
+        # The running loop re-reads the config every iteration, so failure
+        # settings, interval and dry_run apply on the next tick, and the kill
+        # switch and safety settings were applied just above. Only logging is
+        # fixed at startup.
+        note = None
+        if (
+            previous is not None
+            and previous.get_logging_config() != config.get_logging_config()
+        ):
+            note = (
+                "Logging settings are read at startup; restart to apply them. "
+                "Everything else is already in effect."
+            )
+
         return {
             "status": "reloaded",
             "message": "Configuration reloaded successfully from config.yaml",
-            "note": (
-                "Agent must be restarted for changes to take full effect"
-                if agent_state.enabled
-                else None
-            ),
+            "note": note,
         }
     except ConfigValidationError as e:
         # The previous (valid) config stays active.
