@@ -29,7 +29,12 @@ cd py-chaos-agent
 echo "CHAOS_API_TOKEN=$(openssl rand -hex 32)" > .env
 
 # Start the target application and chaos agent
-docker-compose up --build
+docker-compose up --build -d
+
+# The control API starts idle: nothing is injected until you start the agent.
+# (Set `agent.auto_start: true` in config.yaml to start on boot instead.)
+set -a; source .env; set +a
+curl -X POST -H "Authorization: Bearer $CHAOS_API_TOKEN" http://127.0.0.1:9000/agent/start
 
 # View logs
 docker-compose logs -f chaos-agent
@@ -56,8 +61,10 @@ kubectl -n chaos-demo create secret generic chaos-api-token \
 # View chaos agent logs
 kubectl logs -n chaos-demo -l app=resilient-app -c chaos-agent -f
 
-# View metrics
-kubectl port-forward -n chaos-demo svc/resilient-app 8000:8000
+# The demo ConfigMap sets `agent.auto_start: true`, so chaos begins on its own.
+
+# View metrics (port 8000 is on the chaos-agent-api Service, not resilient-app)
+kubectl port-forward -n chaos-demo svc/chaos-agent-api 8000:8000
 curl http://localhost:8000/metrics
 ```
 

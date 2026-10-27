@@ -136,6 +136,34 @@ agent:
 - Validating probability settings
 - Demonstrating chaos behavior safely
 
+### `agent.auto_start`
+
+**Type:** Boolean  
+**Default:** `false`  
+**Description:** API mode only. When `true`, the agent loop begins as soon as the
+API server starts. When `false`, the API starts idle and nothing is injected until
+you call `POST /agent/start`. The standalone agent (`python -m src.agent`) always
+starts immediately, whatever this is set to.
+
+```yaml
+agent:
+  auto_start: true # begin injecting when the API starts
+```
+
+The kill switch and safety settings are in place before the loop starts.
+
+## Environment Variables
+
+These override or supplement the config file.
+
+| Variable | Purpose |
+| --- | --- |
+| `LOG_LEVEL` | Log level, overriding `logging.level` |
+| `LOG_FORMAT` | `json` or `text`, overriding `logging.format` |
+| `JSON_LOGS` | **Deprecated** alias: a true value (`true`, `1`, `yes`) selects JSON unless `LOG_FORMAT` is set. Use `LOG_FORMAT=json` |
+| `CHAOS_METRICS_PORT` | Metrics port, default 8000. The server refuses to start if it cannot bind it |
+| `CHAOS_API_TOKEN`, `CHAOS_API_HOST`, ... | See [API Security](../user-guide/api-security.md) |
+
 ## Failure Configurations
 
 All failure types share common parameters:

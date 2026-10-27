@@ -302,7 +302,8 @@ curl localhost:8000/metrics
 ```bash
 # Check if metrics server started
 kubectl logs -n chaos-demo <pod-name> -c chaos-agent | grep "Metrics"
-# Should see: [Metrics] Prometheus exporter running on :8000
+# Should see: Metrics server started   (with the port)
+# If the port was taken, the agent exits with: Cannot start the metrics server
 
 # Check if port is exposed
 kubectl get pod -n chaos-demo <pod-name> -o yaml | grep -A 5 ports
@@ -329,18 +330,22 @@ pkill -f "port-forward"
 # Create new port forward
 kubectl port-forward -n chaos-demo <pod-name> 8000:8000
 
-# Or use service
-kubectl port-forward -n chaos-demo svc/resilient-app 8000:8000
+# Or use the Service that exposes the metrics port
+kubectl port-forward -n chaos-demo svc/chaos-agent-api 8000:8000
 ```
 
-**Metrics server crashed:**
+**Port 8000 is already in use:**
 
-```python
-# Check for exceptions in metrics.py
-# Increase debugging
-import logging
-logging.basicConfig(level=logging.DEBUG)
+The metrics server binds its port before the agent reports it started, so a
+conflict stops startup with a clear message instead of failing silently:
+
+```text
+Cannot start the metrics server ... Address already in use.
+Set CHAOS_METRICS_PORT (or --metrics-port) to a free port.
 ```
+
+Set `CHAOS_METRICS_PORT` (for the standalone agent and the API server) or pass
+`--metrics-port` to the API server, and update your Prometheus scrape config.
 
 ### Docker Compose Issues
 

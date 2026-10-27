@@ -125,11 +125,26 @@ Exposes Prometheus metrics for observability.
 - `chaos_injections_total`: Counter with labels for failure_type and status
 - `chaos_injection_active`: Gauge indicating currently active injections
 
+Statuses of `chaos_injections_total`:
+
+| `status` | Meaning |
+| --- | --- |
+| `success` | The injection ran for its **full duration** |
+| `aborted` | It was cut short by `/agent/stop`, `/inject/abort`, the kill switch, or shutdown |
+| `skipped` | A dry run, or refused by the one-injection-per-type guard |
+| `failed` | It could not be applied, was refused (for example PID 1), or errored |
+
+`success` and `aborted` are counted when the injection **finishes**, not when its
+effect is first applied. Counting at application time used to make an injection
+that was then aborted look like a success.
+
 **Implementation:**
 
-- Runs HTTP server in background thread
+- The HTTP server runs in a background thread, but the socket is bound before
+  startup continues, so a port that is already in use stops the process with a
+  clear error
 - Uses prometheus_client library
-- Exposed on port 8000 at `/metrics` endpoint
+- Exposed on port 8000 at `/metrics` (change it with `CHAOS_METRICS_PORT`)
 
 ## Data Flow
 
@@ -158,8 +173,8 @@ Exposes Prometheus metrics for observability.
 2. During injection
    → Perform chaos operation
 
-3. On completion (success or failure)
-   → Increment INJECTIONS_TOTAL counter
+3. On completion
+   → Increment INJECTIONS_TOTAL with status success, aborted, or failed
    → Set INJECTION_ACTIVE gauge to 0
 
 4. Prometheus scrapes metrics endpoint
