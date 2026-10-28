@@ -11,14 +11,13 @@ from enum import Enum
 import os
 import threading
 import time
-import random
 from datetime import datetime, timezone
 from contextlib import asynccontextmanager, nullcontext
 
 from .auth import auth_disabled, get_expected_token, require_auth
-from .chance import should_inject
 from . import limits
 from .config import Config, load_config, validate_config
+from .engine import ChaosEngine, Settings, run_injection, snapshot_settings
 from .failures.network import reconcile_stale_rules
 from .lifecycle import lifecycle
 from .resources import apply_settings_and_report, governor
@@ -26,11 +25,7 @@ from .schemas import (
     ConfigValidationError,
     merge_failure_config,
 )
-from .failures.cpu import inject_cpu
-from .failures.memory import inject_memory
-from .failures.process import inject_process
-from .failures.network import inject_network
-from .logging_config import get_logger, set_correlation_id
+from .logging_config import get_logger
 from .metrics import (
     INJECTIONS_TOTAL,
     INJECTION_ACTIVE,
@@ -48,9 +43,12 @@ class AgentState:
 
     enabled: bool = False
     config: Optional[Config] = None
-    agent_thread: Optional[threading.Thread] = None
-    stop_event: threading.Event = threading.Event()
-    start_time: Optional[float] = None
+    # Guards ``config`` against the engine thread. Every write to the config
+    # (PATCH, reload) takes it, and so does the engine's per-tick snapshot, so
+    # a tick sees either the old config or the new one, never a mix.
+    config_lock: threading.RLock = threading.RLock()
+    # The loop. Created below, once the callbacks it needs are defined.
+    engine: ChaosEngine
     kill_switch: Optional[KillSwitch] = None
     # True only if the loop was started with the kill switch explicitly turned
     # off (and the config allows that). Defaults to protected.
@@ -112,12 +110,29 @@ def _active_kill_switch() -> Optional[KillSwitch]:
     return ks if ks is not None and ks.config.enabled else None
 
 
+def _settings_snapshot() -> Optional[Settings]:
+    """A private copy of the loop settings, taken under the config lock."""
+    with agent_state.config_lock:
+        config = agent_state.config
+        return snapshot_settings(config) if config is not None else None
+
+
+def _on_engine_exit() -> None:
+    agent_state.enabled = False
+
+
+agent_state.engine = ChaosEngine(
+    settings_provider=_settings_snapshot,
+    kill_switch_provider=_active_kill_switch,
+    on_exit=_on_engine_exit,
+    name="chaos-api",
+)
+
+
 def _begin_agent_loop() -> None:
-    """Start the agent loop thread. Used by POST /agent/start and auto_start."""
-    agent_state.stop_event.clear()
+    """Start the agent loop. Used by POST /agent/start and auto_start."""
     agent_state.enabled = True
-    agent_state.agent_thread = threading.Thread(target=run_agent_loop, daemon=True)
-    agent_state.agent_thread.start()
+    agent_state.engine.start()
 
 
 def _validation_error(exc: ConfigValidationError) -> HTTPException:
@@ -174,11 +189,8 @@ async def lifespan(app: FastAPI):
     # waits for running background tasks before it reaches this point.)
     if agent_state.enabled:
         logger.info("Shutting down agent on API shutdown")
-    agent_state.stop_event.set()
     lifecycle.shutdown("api shutdown")
-    thread = agent_state.agent_thread
-    if thread is not None and thread.is_alive():
-        thread.join(timeout=5)
+    agent_state.engine.stop(timeout=5, reason="api shutdown")
     if agent_state.kill_switch is not None:
         agent_state.kill_switch.stop_monitoring()
         agent_state.kill_switch = None
@@ -268,92 +280,6 @@ class FailureConfigResponse(BaseModel):
 # ============================================================================
 
 
-def _run_injection(name: str, cfg: Dict[str, Any], dry_run: bool) -> None:
-    """Run one injection by name. Looks the function up at call time."""
-    injectors = {
-        "cpu": inject_cpu,
-        "memory": inject_memory,
-        "process": inject_process,
-        "network": inject_network,
-    }
-    injectors[name](cfg, dry_run=dry_run)
-
-
-def run_agent_loop():
-    """Background agent loop with kill switch protection."""
-    logger.info("API-controlled agent loop starting")
-    start_time = time.time()
-    agent_state.start_time = start_time
-    iteration = 0
-    paused = False
-
-    while not agent_state.stop_event.is_set() and not lifecycle.is_shutting_down():
-        try:
-            iteration += 1
-            ks = _active_kill_switch()
-            if paused and (ks is None or ks.allows_injection()[0]):
-                logger.info("Kill switch closed, chaos resuming")
-                paused = False
-            correlation_id = f"api-iter-{iteration}-{int(time.time())}"
-            set_correlation_id(correlation_id)
-
-            config = get_config()
-
-            for name, cfg in config.failures.items():
-                if agent_state.stop_event.is_set():
-                    break
-
-                if not cfg["enabled"]:
-                    continue
-
-                probability = cfg["probability"]
-                if not should_inject(probability, random.random()):
-                    continue
-
-                logger.info(
-                    f"Injecting {name} failure",
-                    extra={"failure_type": name, "iteration": iteration},
-                )
-
-                try:
-                    ks = _active_kill_switch()
-                    with (
-                        ks.injection(name, config.agent.dry_run)
-                        if ks
-                        else nullcontext()
-                    ):
-                        _run_injection(name, cfg, config.agent.dry_run)
-                except KillSwitchOpen as e:
-                    # Chaos is paused, not stopped: skip the rest of this tick
-                    # and try again next interval. It resumes by itself once
-                    # the kill switch closes.
-                    if not paused:
-                        logger.warning(
-                            "Chaos paused by kill switch", extra={"reason": e.reason}
-                        )
-                        paused = True
-                    break
-                except Exception as e:
-                    logger.error(
-                        f"Failure injection error: {e}",
-                        exc_info=True,
-                        extra={"failure_type": name},
-                    )
-
-            agent_state.stop_event.wait(config.agent.interval_seconds)
-
-        except Exception as e:
-            logger.error(f"Error in agent loop: {e}", exc_info=True)
-            try:
-                config = get_config()
-                agent_state.stop_event.wait(config.agent.interval_seconds)
-            except Exception:
-                agent_state.stop_event.wait(10)
-
-    logger.info("API-controlled agent loop stopped")
-    agent_state.enabled = False
-
-
 # ============================================================================
 # API Endpoints
 # ============================================================================
@@ -385,8 +311,9 @@ async def get_status():
     """Get current agent status."""
     config = get_config()
     uptime = None
-    if agent_state.enabled and agent_state.start_time is not None:
-        uptime = time.time() - agent_state.start_time
+    started = agent_state.engine.start_time
+    if agent_state.enabled and started is not None:
+        uptime = time.time() - started
 
     enabled_failures = [name for name, cfg in config.failures.items() if cfg["enabled"]]
     ks = _active_kill_switch()
@@ -462,17 +389,13 @@ async def stop_agent():
         raise HTTPException(status_code=400, detail="Agent not running")
 
     logger.info("Stopping chaos agent via API")
-    agent_state.stop_event.set()
-    # Cut short any running injection so its effect is removed now, not when
-    # its duration would have ended.
-    lifecycle.abort_active("agent stopped")
+    # Ends the loop and cuts short any running injection, so its effect is
+    # removed now, not when its duration would have ended. Waits briefly for
+    # the loop and its injections to finish.
+    agent_state.engine.stop(timeout=5, reason="agent stopped")
 
     # The kill switch keeps running. It lives for the whole process, so stopping
     # and starting the agent cannot be used to clear a tripped breaker.
-
-    # Wait briefly for thread to stop
-    if agent_state.agent_thread:
-        agent_state.agent_thread.join(timeout=5)
 
     agent_state.enabled = False
 
@@ -603,7 +526,7 @@ async def manual_injection(
             # between the request and the background task starting. Also records
             # the injection so a process kill earns its grace period.
             with ks.injection(failure_type, request.dry_run) if ks else nullcontext():
-                _run_injection(failure_type, failure_config, request.dry_run)
+                run_injection(failure_type, failure_config, request.dry_run)
         except KillSwitchOpen as e:
             logger.warning(
                 "Manual injection skipped: kill switch tripped before it started",
@@ -727,19 +650,21 @@ async def update_config(request: ConfigUpdateRequest):
     if errors:
         raise _validation_error(ConfigValidationError(errors))
 
-    # Phase 2: apply. Each failure dict is replaced whole (never edited in
-    # place) so the running loop always sees a complete, valid config.
-    if request.interval_seconds is not None:
-        config.agent.interval_seconds = request.interval_seconds
-        changes["interval_seconds"] = request.interval_seconds
+    # Phase 2: apply, all under the config lock. The loop snapshots the config
+    # under the same lock, so it sees this request entirely or not at all.
+    # Each failure dict is replaced whole (never edited in place).
+    with agent_state.config_lock:
+        if request.interval_seconds is not None:
+            config.agent.interval_seconds = request.interval_seconds
+            changes["interval_seconds"] = request.interval_seconds
 
-    if request.dry_run is not None:
-        config.agent.dry_run = request.dry_run
-        changes["dry_run"] = request.dry_run
+        if request.dry_run is not None:
+            config.agent.dry_run = request.dry_run
+            changes["dry_run"] = request.dry_run
 
-    for name, new_config in validated_failures.items():
-        config.failures[name] = new_config
-        changes[f"failures.{name}"] = new_config
+        for name, new_config in validated_failures.items():
+            config.failures[name] = new_config
+            changes[f"failures.{name}"] = new_config
 
     logger.info("Configuration updated via API", extra={"changes": changes})
 
@@ -775,9 +700,10 @@ async def update_failure_config(
     except ConfigValidationError as e:
         raise _validation_error(e)
 
-    # Replace whole (never edit in place) so the running loop never sees a
-    # partially updated config.
-    config.failures[failure_name] = validated
+    # Replace whole (never edit in place), under the lock the loop snapshots
+    # with, so it never sees a partially updated config.
+    with agent_state.config_lock:
+        config.failures[failure_name] = validated
 
     logger.info(
         f"Updated {failure_name} configuration",
@@ -795,14 +721,15 @@ async def update_failure_config(
 async def reload_config():
     """Reload configuration from config.yaml file."""
     try:
-        previous = agent_state.config
         config = load_config()
-        agent_state.config = config
+        with agent_state.config_lock:
+            previous = agent_state.config
+            agent_state.config = config
         apply_settings_and_report(config.safety)
         apply_kill_switch_config(config)
         logger.info("Configuration reloaded from file")
 
-        # The running loop re-reads the config every iteration, so failure
+        # The running loop snapshots the config every iteration, so failure
         # settings, interval and dry_run apply on the next tick, and the kill
         # switch and safety settings were applied just above. Only logging is
         # fixed at startup.

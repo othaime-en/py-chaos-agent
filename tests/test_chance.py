@@ -52,23 +52,25 @@ class TestDistribution:
         assert abs(fired / n - probability) < 0.012
 
 
-class TestBothLoopsUseIt:
-    """The standalone agent and the API loop must share the rule."""
+class TestBothEntryPointsShareOneLoop:
+    """The standalone agent and the API mode run the same engine, so there is
+    one place where the rule is applied."""
 
-    def test_agent_uses_the_shared_rule(self):
+    def test_the_engine_uses_the_shared_rule(self):
         import inspect
 
-        from src import agent
+        from src import engine
 
-        source = inspect.getsource(agent.main)
+        source = inspect.getsource(engine.ChaosEngine.run_tick)
         assert "should_inject(" in source
         assert "roll > probability" not in source
+        assert "random.random() > probability" not in source
 
-    def test_api_loop_uses_the_shared_rule(self):
+    def test_neither_entry_point_has_its_own_loop(self):
         import inspect
 
-        from src import api
+        from src import agent, api
 
-        source = inspect.getsource(api.run_agent_loop)
-        assert "should_inject(" in source
-        assert "random.random() > probability" not in source
+        assert "should_inject(" not in inspect.getsource(agent)
+        assert "should_inject(" not in inspect.getsource(api)
+        assert not hasattr(api, "run_agent_loop")
