@@ -9,6 +9,11 @@ agent:
   # Dry run mode - if true, logs what would happen without actually doing it
   dry_run: false
 
+  # API mode only: start injecting as soon as the API server starts. When false
+  # (the default), nothing is injected until you call POST /agent/start. The
+  # standalone agent (python -m src.agent) always starts immediately.
+  auto_start: false
+
 # Logging configuration
 logging:
   # Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL

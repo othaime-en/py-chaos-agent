@@ -269,7 +269,11 @@ def test_defaults_are_filled_in():
             network={"duration_seconds": 5},
         )
     )
-    assert out["agent"] == {"interval_seconds": 10, "dry_run": False}
+    assert out["agent"] == {
+        "interval_seconds": 10,
+        "dry_run": False,
+        "auto_start": False,
+    }
     assert out["failures"]["cpu"] == {
         "enabled": False,
         "probability": 0.0,

@@ -50,14 +50,20 @@ services:
       - chaos-logs:/var/log/chaos-agent
     environment:
       - LOG_LEVEL=INFO
-      - JSON_LOGS=true
+      - LOG_FORMAT=json
       - LOG_FILE=/var/log/chaos-agent/agent.log
       # Reachable through the published (loopback-only) host port above.
       - CHAOS_API_HOST=0.0.0.0
       # Required. Compose refuses to start without it. See .env.example.
       - CHAOS_API_TOKEN=${CHAOS_API_TOKEN:?Set CHAOS_API_TOKEN, e.g. openssl rand -hex 32}
     healthcheck:
-      test: [ "CMD-SHELL", "curl -f http://localhost:9000/health || exit 1" ]
+      # The image has Python but not curl. urlopen raises on a connection error
+      # or any non-2xx response, which makes the check exit non-zero.
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://localhost:9000/health', timeout=5)"
       interval: 30s
       timeout: 10s
       retries: 3

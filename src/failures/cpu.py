@@ -43,9 +43,11 @@ def _terminate(procs):
             p.join(timeout=2)
 
 
-def _cpu_hog(cores: int, duration: int):
+def _cpu_hog(cores: int, duration: int) -> bool:
     """
     Spawn multiple worker processes to consume CPU cores.
+
+    Returns True if the run was cut short by an abort or shutdown.
 
     The wait is interruptible: an abort or shutdown stops the workers
     immediately. Workers are always terminated on the way out, whether the
@@ -77,6 +79,7 @@ def _cpu_hog(cores: int, duration: int):
             # Workers stop on their own at the deadline; give them a moment.
             for p in procs:
                 p.join(timeout=5)
+        return interrupted
 
     except Exception as e:
         logger.error(
@@ -177,10 +180,13 @@ def _inject_cpu(config: dict, dry_run: bool = False):
     start_time = time.time()
 
     try:
-        _cpu_hog(cores, duration)
+        interrupted = bool(_cpu_hog(cores, duration))
         elapsed = time.time() - start_time
 
-        INJECTIONS_TOTAL.labels(failure_type="cpu", status="success").inc()
+        # `success` means it ran for its full duration; `aborted` means cut short
+        INJECTIONS_TOTAL.labels(
+            failure_type="cpu", status="aborted" if interrupted else "success"
+        ).inc()
 
         logger.info(
             "CPU stress injection completed successfully",

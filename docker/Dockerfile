@@ -21,7 +21,7 @@ USER root
 
 # Set default log level (can be overridden)
 ENV LOG_LEVEL=INFO
-ENV JSON_LOGS=true
+ENV LOG_FORMAT=json
 
 # Expose API port (9000) and metrics port (8000)
 EXPOSE 9000 8000

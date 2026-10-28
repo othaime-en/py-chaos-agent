@@ -509,15 +509,21 @@ def _run_network_injection(interface: str, delay_ms: int, duration: int) -> None
             extra={"interface": interface, "delay_ms": delay_ms},
         )
 
-        INJECTIONS_TOTAL.labels(failure_type="network", status="success").inc()
-
         logger.debug(f"Holding network delay for {duration} seconds")
         # Returns early on abort or shutdown; the finally below removes the rule.
-        if lifecycle.sleep(duration):
+        interrupted = lifecycle.sleep(duration)
+        if interrupted:
             logger.warning(
                 "Network injection cut short",
                 extra={"interface": interface, "reason": "abort or shutdown"},
             )
+
+        # Counted when the injection FINISHES, not when the rule is applied, so
+        # `success` means it ran for its full duration and `aborted` means it
+        # was cut short.
+        INJECTIONS_TOTAL.labels(
+            failure_type="network", status="aborted" if interrupted else "success"
+        ).inc()
 
     except Exception as e:
         elapsed = time.time() - start_time

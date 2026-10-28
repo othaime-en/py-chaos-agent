@@ -1150,3 +1150,175 @@ class TestProcessTargetingApi:
             "/config/failures/process", json={"target_name": "python"}
         )
         assert response.status_code == 422
+
+
+class TestReloadNote:
+    """The note used to claim the agent 'must be restarted' for every reload."""
+
+    def _reload(self, client, monkeypatch, logging_section):
+        from src.config import Config
+
+        reloaded = Config({"agent": {}, "failures": {}, "logging": logging_section})
+        monkeypatch.setattr("src.api.load_config", lambda: reloaded)
+        return client.post("/config/reload").json()
+
+    def test_no_note_when_nothing_needs_a_restart(self, client, monkeypatch):
+        agent_state.enabled = True
+        same = agent_state.config.get_logging_config()
+        body = self._reload(client, monkeypatch, same)
+        assert body["status"] == "reloaded"
+        assert body["note"] is None
+
+    def test_never_says_the_agent_must_be_restarted_for_everything(
+        self, client, monkeypatch
+    ):
+        agent_state.enabled = True
+        body = self._reload(client, monkeypatch, {"level": "DEBUG"})
+        assert "must be restarted" not in str(body)
+
+    def test_a_logging_change_says_logging_needs_a_restart(self, client, monkeypatch):
+        body = self._reload(client, monkeypatch, {"level": "DEBUG"})
+        assert "Logging" in body["note"] and "restart" in body["note"]
+        assert "Everything else is already in effect" in body["note"]
+
+    def test_failure_settings_really_do_apply_without_a_restart(
+        self, client, monkeypatch
+    ):
+        """The claim in the note: the loop re-reads the config each iteration."""
+        from src.config import Config
+
+        reloaded = Config(
+            {
+                "agent": {"interval_seconds": 7},
+                "failures": {
+                    "cpu": {
+                        "enabled": True,
+                        "probability": 0.9,
+                        "cores": 1,
+                        "duration_seconds": 1,
+                    }
+                },
+            }
+        )
+        monkeypatch.setattr("src.api.load_config", lambda: reloaded)
+        assert client.post("/config/reload").status_code == 200
+        import src.api as api
+
+        assert api.get_config() is reloaded
+        assert api.get_config().agent.interval_seconds == 7
+        assert api.get_config().failures["cpu"]["probability"] == 0.9
+
+
+class TestAutoStart:
+    """In API mode nothing injected until POST /agent/start, and the README
+    never said so."""
+
+    def _with_auto_start(self, monkeypatch, value):
+        from src.config import load_config
+
+        config = load_config()
+        config.agent.auto_start = value
+        monkeypatch.setattr("src.api.load_config", lambda: config)
+
+    def test_default_config_does_not_auto_start(self):
+        from src.config import load_config
+
+        assert load_config().agent.auto_start is False
+
+    def test_the_agent_stays_idle_by_default(self, monkeypatch):
+        self._with_auto_start(monkeypatch, False)
+        with TestClient(app):
+            assert agent_state.enabled is False
+            assert agent_state.agent_thread is None
+
+    def test_auto_start_begins_the_loop_when_the_api_starts(self, monkeypatch):
+        self._with_auto_start(monkeypatch, True)
+        with TestClient(app) as client:
+            assert agent_state.enabled is True
+            assert agent_state.agent_thread.is_alive()
+            headers = {"Authorization": f"Bearer {TEST_TOKEN}"}
+            assert client.get("/status", headers=headers).json()["enabled"] is True
+
+    def test_start_reports_already_running_after_an_auto_start(self, monkeypatch):
+        self._with_auto_start(monkeypatch, True)
+        with TestClient(app) as client:
+            headers = {"Authorization": f"Bearer {TEST_TOKEN}"}
+            response = client.post("/agent/start", headers=headers)
+            assert response.status_code == 400
+            assert "already running" in response.json()["detail"]
+
+    def test_the_kill_switch_is_in_place_before_the_loop_starts(self, monkeypatch):
+        self._with_auto_start(monkeypatch, True)
+        with TestClient(app):
+            assert agent_state.kill_switch is not None
+
+    def test_shutdown_stops_an_auto_started_loop(self, monkeypatch):
+        self._with_auto_start(monkeypatch, True)
+        with TestClient(app):
+            thread = agent_state.agent_thread
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+
+    def test_auto_start_can_be_stopped_and_started_like_any_run(self, monkeypatch):
+        self._with_auto_start(monkeypatch, True)
+        with TestClient(app) as client:
+            headers = {"Authorization": f"Bearer {TEST_TOKEN}"}
+            assert client.post("/agent/stop", headers=headers).status_code == 200
+            assert client.post("/agent/start", headers=headers).status_code == 200
+
+
+class TestProbabilityInTheRealLoop:
+    def test_probability_zero_never_fires_even_for_a_roll_of_zero(
+        self, client, monkeypatch
+    ):
+        import time as _time
+
+        calls = []
+        monkeypatch.setattr("src.api.inject_cpu", lambda *a, **k: calls.append(1))
+        monkeypatch.setattr("src.api.random.random", lambda: 0.0)
+        for name, cfg in agent_state.config.failures.items():
+            cfg["enabled"] = name == "cpu"
+        agent_state.config.failures["cpu"]["probability"] = 0.0
+        agent_state.config.agent.interval_seconds = 1
+
+        client.post("/agent/start")
+        _time.sleep(2.5)  # at least two loop iterations
+        assert calls == []
+
+        # And the loop itself is working: probability 1.0 fires
+        agent_state.config.failures["cpu"]["probability"] = 1.0
+        deadline = _time.time() + 5
+        while not calls and _time.time() < deadline:
+            _time.sleep(0.05)
+        assert calls, "the loop never injected at probability 1.0"
+
+
+class TestMetricsEndpoints:
+    def test_summary_reports_aborted_and_a_total_that_includes_it(self, client):
+        from src.metrics import INJECTIONS_TOTAL
+
+        INJECTIONS_TOTAL.labels(failure_type="network", status="success").inc(2)
+        INJECTIONS_TOTAL.labels(failure_type="network", status="aborted").inc(3)
+        INJECTIONS_TOTAL.labels(failure_type="network", status="failed").inc(1)
+        INJECTIONS_TOTAL.labels(failure_type="network", status="skipped").inc(4)
+        summary = client.get("/metrics/summary").json()["metrics"]["network"]
+        assert summary["success"] == 2
+        assert summary["aborted"] == 3
+        assert summary["failed"] == 1
+        assert summary["skipped"] == 4
+        assert summary["total"] == 10
+
+    def test_summary_timestamp_is_utc_and_does_not_warn(self, client):
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            stamp = client.get("/metrics/summary").json()["timestamp"]
+        assert stamp.endswith("Z") and "+00:00" not in stamp
+
+    def test_reset_clears_the_counts(self, client):
+        from src.metrics import INJECTIONS_TOTAL, metric_value
+
+        INJECTIONS_TOTAL.labels(failure_type="cpu", status="success").inc(5)
+        assert client.post("/metrics/reset").status_code == 200
+        assert metric_value(INJECTIONS_TOTAL, failure_type="cpu", status="success") == 0

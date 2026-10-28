@@ -7,11 +7,11 @@ import pytest
 
 from src import limits
 from src.failures import cpu, memory, network
-from src.metrics import INJECTIONS_TOTAL
+from src.metrics import INJECTIONS_TOTAL, metric_value
 
 
 def failed(kind):
-    return INJECTIONS_TOTAL.labels(failure_type=kind, status="failed")._value.get()
+    return metric_value(INJECTIONS_TOTAL, failure_type=kind, status="failed")
 
 
 class TestCpuLimits:

@@ -17,9 +17,9 @@ def reset_metrics():
     lazy-initialized and may retain state across clears in some scenarios.
     """
     # Clear the internal metrics dictionaries
-    INJECTIONS_TOTAL._metrics.clear()
-    INJECTION_ACTIVE._metrics.clear()
-    INJECTIONS_CLAMPED._metrics.clear()
+    INJECTIONS_TOTAL.clear()
+    INJECTION_ACTIVE.clear()
+    INJECTIONS_CLAMPED.clear()
     governor.reset()
     lifecycle.reset()
 
@@ -39,9 +39,9 @@ def reset_metrics():
     yield
 
     # Optional: Clean up after test (helps with test isolation)
-    INJECTIONS_TOTAL._metrics.clear()
-    INJECTION_ACTIVE._metrics.clear()
-    INJECTIONS_CLAMPED._metrics.clear()
+    INJECTIONS_TOTAL.clear()
+    INJECTION_ACTIVE.clear()
+    INJECTIONS_CLAMPED.clear()
     governor.reset()
     lifecycle.reset()
 

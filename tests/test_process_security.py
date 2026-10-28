@@ -9,7 +9,7 @@ from src.failures.process import (
     CRITICAL_PROCESSES,
     PROHIBITED_TARGETS,
 )
-from src.metrics import INJECTIONS_TOTAL
+from src.metrics import INJECTIONS_TOTAL, metric_value
 
 
 class TestTargetNameValidation:
@@ -134,10 +134,7 @@ class TestProcessInjectionWithValidation:
         log_messages = " ".join([record.message for record in caplog.records])
         assert "Invalid target name" in log_messages or "too broad" in log_messages
         assert (
-            INJECTIONS_TOTAL.labels(
-                failure_type="process", status="failed"
-            )._value.get()
-            == 1
+            metric_value(INJECTIONS_TOTAL, failure_type="process", status="failed") == 1
         )
 
     def test_inject_rejects_short_target(self, caplog):

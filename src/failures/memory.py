@@ -9,13 +9,16 @@ from ..logging_config import get_logger
 logger = get_logger(__name__)
 
 
-def _hold_memory(mb, duration):
+def _hold_memory(mb, duration) -> bool:
     """
     Allocate and hold memory for the specified duration.
     Runs in a separate thread to avoid blocking.
+
+    Returns True if the hold was cut short by an abort or shutdown.
     """
     data = []
     allocation_start = time.time()
+    interrupted = False
 
     try:
         logger.info(
@@ -51,7 +54,8 @@ def _hold_memory(mb, duration):
 
         logger.debug(f"Holding {mb} MB for {duration} seconds")
         # Returns early on abort or shutdown; the finally below frees the memory.
-        if lifecycle.sleep(duration):
+        interrupted = lifecycle.sleep(duration)
+        if interrupted:
             logger.warning(
                 "Memory injection cut short", extra={"reason": "abort or shutdown"}
             )
@@ -90,6 +94,8 @@ def _hold_memory(mb, duration):
         data.clear()
         del data
         logger.debug("Memory cleanup completed", extra={"freed_chunks": data_len})
+
+    return interrupted
 
 
 def inject_memory(config: dict, dry_run: bool = False):
@@ -171,8 +177,11 @@ def _inject_memory(config: dict, dry_run: bool, ticket) -> bool:
 
         try:
             with lifecycle.bound(ticket):
-                _hold_memory(mb, duration)
-            INJECTIONS_TOTAL.labels(failure_type="memory", status="success").inc()
+                interrupted = bool(_hold_memory(mb, duration))
+            # `success` means it ran for its full duration; `aborted` cut short
+            INJECTIONS_TOTAL.labels(
+                failure_type="memory", status="aborted" if interrupted else "success"
+            ).inc()
 
             logger.info(
                 "Memory pressure injection completed successfully",

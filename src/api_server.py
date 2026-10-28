@@ -14,11 +14,10 @@ import uvicorn
 import argparse
 import os
 import signal
-import sys
 from . import auth
 from .lifecycle import lifecycle
 from .logging_config import setup_logging, get_logger
-from .metrics import start_metrics_server
+from .metrics import MetricsServerError, metrics_port_from_env, start_metrics_server
 
 logger = get_logger(__name__)
 
@@ -59,8 +58,11 @@ def main():
     parser.add_argument(
         "--metrics-port",
         type=int,
-        default=8000,
-        help="Port for Prometheus metrics (default: 8000)",
+        default=None,
+        help=(
+            "Port for Prometheus metrics. Default: the CHAOS_METRICS_PORT "
+            "environment variable, or 8000."
+        ),
     )
     parser.add_argument(
         "--reload",
@@ -105,17 +107,22 @@ def main():
         extra={
             "api_host": args.host,
             "api_port": args.port,
-            "metrics_port": args.metrics_port,
+            "metrics_port": args.metrics_port,  # None: from CHAOS_METRICS_PORT or 8000
         },
     )
 
-    # Start metrics server
+    # Start metrics server. It binds before returning, so a port already in use
+    # stops startup here with a clear message.
     try:
-        start_metrics_server(port=args.metrics_port)
-        logger.info(f"Metrics server started on port {args.metrics_port}")
-    except Exception as e:
-        logger.error(f"Failed to start metrics server: {e}")
-        sys.exit(1)
+        metrics_port = (
+            args.metrics_port
+            if args.metrics_port is not None
+            else metrics_port_from_env()
+        )
+        start_metrics_server(port=metrics_port)
+        logger.info(f"Metrics server started on port {metrics_port}")
+    except MetricsServerError as e:
+        raise SystemExit(f"Refusing to start: {e}")
 
     # Backstop: run cleanups at interpreter exit even if no signal handler ran.
     lifecycle.install_atexit()

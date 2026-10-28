@@ -161,6 +161,9 @@ class AgentSettings(_StrictModel):
         le=limits.MAX_INTERVAL_SECONDS,
     )
     dry_run: bool = False
+    # API mode only: start injecting as soon as the API starts, instead of
+    # waiting for POST /agent/start. The standalone agent always runs.
+    auto_start: bool = False
 
 
 class FailuresSection(_StrictModel):

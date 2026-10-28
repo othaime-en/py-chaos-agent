@@ -19,7 +19,7 @@ from src.kill_switch import (
     KillSwitchOpen,
     wrap_injection_with_context,
 )
-from src.metrics import KILL_SWITCH_STATE, KILL_SWITCH_TRIPS
+from src.metrics import KILL_SWITCH_STATE, KILL_SWITCH_TRIPS, metric_value
 
 
 class Clock:
@@ -80,11 +80,11 @@ def trip(ks, target):
 
 
 def gauge():
-    return KILL_SWITCH_STATE._value.get()
+    return metric_value(KILL_SWITCH_STATE)
 
 
 def trips():
-    return KILL_SWITCH_TRIPS._value.get()
+    return metric_value(KILL_SWITCH_TRIPS)
 
 
 # ---------------------------------------------------------------------------
@@ -561,7 +561,7 @@ class TestHealthCheck:
         from src.metrics import KILL_SWITCH_HEALTH_CHECKS
 
         def count(result):
-            return KILL_SWITCH_HEALTH_CHECKS.labels(result=result)._value.get()
+            return metric_value(KILL_SWITCH_HEALTH_CHECKS, result=result)
 
         ks, _, target = make()
         healthy, unhealthy = count("healthy"), count("unhealthy")

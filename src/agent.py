@@ -6,9 +6,10 @@ import sys
 import uuid
 import logging
 from .config import load_config, validate_config
-from .metrics import start_metrics_server
+from .metrics import MetricsServerError, metrics_port_from_env, start_metrics_server
 from .resources import apply_settings_and_report
 from .failures.network import reconcile_stale_rules
+from .chance import should_inject
 from .kill_switch import KillSwitch, KillSwitchOpen
 from .lifecycle import lifecycle
 from .logging_config import (
@@ -114,14 +115,16 @@ def main():
             extra={"interface": interface, "stale_rule_removed": bool(repaired)},
         )
 
-    # Start metrics server
+    # Start the metrics server. It binds before returning, so a port that is
+    # already in use fails here, loudly. A chaos agent nobody can observe is not
+    # worth running, so exit instead of carrying on blind.
     try:
-        start_metrics_server()
-        logger.info("Metrics server started successfully")
-    except Exception as e:
-        logger.error(
-            "Failed to start metrics server", exc_info=True, extra={"error": str(e)}
-        )
+        metrics_port = metrics_port_from_env()
+        start_metrics_server(metrics_port)
+        logger.info("Metrics server started", extra={"port": metrics_port})
+    except MetricsServerError as e:
+        logger.critical("Cannot start the metrics server", extra={"error": str(e)})
+        sys.exit(1)
 
     logger.info(
         "Agent initialized and ready",
@@ -162,7 +165,7 @@ def main():
                 probability = cfg["probability"]
                 roll = random.random()
 
-                if roll > probability:
+                if not should_inject(probability, roll):
                     logger.debug(
                         "Probability check failed, skipping injection",
                         extra={

@@ -5,11 +5,12 @@ released, and dry runs reserve nothing.
 """
 
 import threading
+import time
 
 import pytest
 
 from src.failures import cpu, memory
-from src.metrics import INJECTIONS_CLAMPED, INJECTIONS_TOTAL
+from src.metrics import INJECTIONS_CLAMPED, INJECTIONS_TOTAL, metric_value
 from src.resources import MIB, CgroupInfo, SafetySettings, governor
 
 
@@ -31,11 +32,11 @@ def set_container(
 
 
 def counter(kind, status):
-    return INJECTIONS_TOTAL.labels(failure_type=kind, status=status)._value.get()
+    return metric_value(INJECTIONS_TOTAL, failure_type=kind, status=status)
 
 
 def clamped(kind):
-    return INJECTIONS_CLAMPED.labels(failure_type=kind)._value.get()
+    return metric_value(INJECTIONS_CLAMPED, failure_type=kind)
 
 
 def reserved():
@@ -236,3 +237,101 @@ class TestMemoryBudget:
         memory.inject_memory({"mb": 900, "duration_seconds": 1}, dry_run=True)
         assert counter("memory", "failed") == 1
         assert counter("memory", "skipped") == 0
+
+
+# ---------------------------------------------------------------------------
+# `success` means it ran for its full duration; `aborted` means cut short
+# ---------------------------------------------------------------------------
+
+
+class TestSuccessVersusAborted:
+    def test_cpu_cut_short_counts_as_aborted(self, monkeypatch):
+        set_container(monkeypatch)
+        monkeypatch.setattr(cpu, "_cpu_hog", lambda c, d: True)
+        cpu.inject_cpu({"cores": 1, "duration_seconds": 1})
+        assert (counter("cpu", "aborted"), counter("cpu", "success")) == (1, 0)
+
+    @pytest.mark.parametrize("returned", [False, None])
+    def test_cpu_running_to_the_end_counts_as_success(self, monkeypatch, returned):
+        set_container(monkeypatch)
+        monkeypatch.setattr(cpu, "_cpu_hog", lambda c, d: returned)
+        cpu.inject_cpu({"cores": 1, "duration_seconds": 1})
+        assert (counter("cpu", "aborted"), counter("cpu", "success")) == (0, 1)
+
+    def test_a_real_cpu_run_that_is_aborted_counts_as_aborted(self, monkeypatch):
+        from src.lifecycle import lifecycle
+
+        set_container(monkeypatch)
+        t = threading.Thread(
+            target=cpu.inject_cpu, args=({"cores": 1, "duration_seconds": 60},)
+        )
+        t.start()
+        deadline = time.time() + 5
+        while not lifecycle.is_active("cpu") and time.time() < deadline:
+            time.sleep(0.02)
+        lifecycle.abort_active("test")
+        t.join(10)
+        assert (counter("cpu", "aborted"), counter("cpu", "success")) == (1, 0)
+
+    def test_memory_cut_short_counts_as_aborted(self, monkeypatch):
+        set_container(monkeypatch, mem_limit_mb=1000)
+        monkeypatch.setattr(memory, "_hold_memory", lambda mb, d: True)
+        memory.inject_memory({"mb": 10, "duration_seconds": 1})
+        wait_for_memory_threads()
+        assert (counter("memory", "aborted"), counter("memory", "success")) == (1, 0)
+
+    def test_memory_running_to_the_end_counts_as_success(self, monkeypatch):
+        set_container(monkeypatch, mem_limit_mb=1000)
+        monkeypatch.setattr(memory, "_hold_memory", lambda mb, d: False)
+        memory.inject_memory({"mb": 10, "duration_seconds": 1})
+        wait_for_memory_threads()
+        assert (counter("memory", "aborted"), counter("memory", "success")) == (0, 1)
+
+    def test_a_real_memory_hold_that_is_aborted_counts_as_aborted(self, monkeypatch):
+        from src.lifecycle import lifecycle
+
+        set_container(monkeypatch, mem_limit_mb=1000)
+        memory.inject_memory({"mb": 1, "duration_seconds": 60})
+        lifecycle.abort_active("test")
+        wait_for_memory_threads()
+        assert (counter("memory", "aborted"), counter("memory", "success")) == (1, 0)
+
+    def test_hold_memory_reports_whether_it_was_cut_short(self):
+        from src.lifecycle import lifecycle
+
+        assert memory._hold_memory(1, 0) is False  # nothing to wait for
+        ticket, _ = lifecycle.begin("memory")
+        lifecycle.abort_active("test")
+        with lifecycle.bound(ticket):
+            assert memory._hold_memory(1, 30) is True
+        lifecycle.end(ticket)
+
+
+class TestActiveGaugeWithOverlappingRequests:
+    """A second memory injection used to be able to reset the gauge to 0 while
+    the first was still running. The overlap guard prevents that; this locks it in."""
+
+    def test_a_refused_second_injection_leaves_the_gauge_at_one(self, monkeypatch):
+        from src.metrics import INJECTION_ACTIVE
+
+        set_container(monkeypatch, mem_limit_mb=1000)
+        started, finish = threading.Event(), threading.Event()
+
+        def slow_hold(mb, d):
+            started.set()
+            finish.wait(5)
+            return False
+
+        monkeypatch.setattr(memory, "_hold_memory", slow_hold)
+        memory.inject_memory({"mb": 10, "duration_seconds": 1})
+        assert started.wait(5)
+        assert metric_value(INJECTION_ACTIVE, failure_type="memory") == 1
+
+        for _ in range(3):
+            memory.inject_memory({"mb": 10, "duration_seconds": 1})
+        assert counter("memory", "skipped") == 3
+        assert metric_value(INJECTION_ACTIVE, failure_type="memory") == 1
+
+        finish.set()
+        wait_for_memory_threads()
+        assert metric_value(INJECTION_ACTIVE, failure_type="memory") == 0
