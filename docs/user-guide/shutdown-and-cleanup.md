@@ -55,9 +55,15 @@ kernel when the process dies.
 Only one injection of each type (`cpu`, `memory`, `network`) runs at a time.
 Overlapping ones used to be able to corrupt each other's cleanup.
 
-- A request that arrives while one is running is **skipped**: logged with the
-  reason and counted as `chaos_injections_total{status="skipped"}`. The agent loop
-  simply moves on.
+- The agent loop leaves a type alone while its previous injection is still running
+  (a debug log line, no warning, not counted). This is the normal case when
+  `duration_seconds` is longer than `interval_seconds`.
+- Any other request that arrives while one is running is **skipped**: logged with
+  the reason and counted as `chaos_injections_total{status="skipped"}`.
+- Injections of **different** types may run at the same time. The loop starts each
+  on its own thread and does not wait for it, so a long CPU burn no longer delays
+  a network or process injection. They share one resource budget (see
+  [blast radius](blast-radius.md)).
 - `POST /inject/manual` returns **409** (`A network injection is already running`),
   or **503** while the agent is shutting down.
 - Dry runs are never blocked.

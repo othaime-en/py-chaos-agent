@@ -48,31 +48,37 @@ Loads and validates YAML configuration files. Uses dataclasses for type safety a
 - Validate configuration values
 - Provide structured configuration objects to other modules
 
-### 2. Agent Core (`src/agent.py`)
+### 2. Chaos Engine (`src/engine.py`)
 
-The main event loop that orchestrates chaos injections.
+The one loop that orchestrates chaos injections. Both entry points run it:
+`src/agent.py` (standalone) and `src/api.py` (REST API, where
+`POST /agent/start` starts it and `POST /agent/stop` stops it). The entry points
+own startup, signal handling and the HTTP surface; the engine owns scheduling.
 
 **Responsibilities:**
 
-- Load configuration on startup
-- Start metrics server
-- Iterate through configured failure types
+- Snapshot the config once per tick, so a config change is seen whole or not at all
 - Apply probability checks before injection
-- Dynamically import and execute failure modules
-- Handle graceful shutdown and cleanup
+- Start each injection on its own worker thread, so the loop never waits for one
+- Consult the kill switch before starting an injection, and again inside the worker
+- Stop on request: end the loop, abort running injections, and wait for them
 
 **Flow:**
 
 ```
-Start → Load Config → Start Metrics Server → Loop:
+Start → Load Config → Start Metrics Server → Engine loop:
+  - Take a settings snapshot
   - For each failure type:
     - Check if enabled
     - Roll probability dice
-    - Import failure module
-    - Execute injection
-  - Sleep for interval
+    - Check the kill switch (pause the tick if it is open)
+    - Start the injection on a worker thread
+  - Wait for the interval (wakes early on stop or shutdown)
   - Repeat
 ```
+
+Injections of different types overlap. Two of the same type never do: the
+lifecycle guard skips the second one (logged, counted as `skipped`).
 
 ### 3. Failure Modules (`src/failures/`)
 
@@ -264,7 +270,7 @@ All injection functions support dry-run mode:
 
 1. Create new module in `src/failures/<type>.py`
 2. Implement `inject_<type>(config, dry_run)` function
-3. Add to `FAILURE_MODULES` dict in `agent.py`
+3. Add to `FAILURE_MODULES` dict in `engine.py`
 4. Add configuration section to `config.yaml`
 5. Add tests in `tests/test_failures.py`
 
