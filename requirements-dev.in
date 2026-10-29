@@ -3,8 +3,8 @@
 -r requirements.in
 
 # Tests
-pytest==8.3.3
-pytest-cov==5.0.0
+pytest==9.2.0
+pytest-cov==7.1.0
 httpx==0.28.1  # FastAPI TestClient
 
 # Lint and types
