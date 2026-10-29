@@ -1520,3 +1520,32 @@ class TestConfigIsReadAtomically:
             stop.set()
             t.join()
         assert torn == []
+
+
+class TestPausedWinsOverAlreadyRunning:
+    def test_a_tripped_breaker_is_reported_even_while_the_aborted_injection_unwinds(
+        self, client
+    ):
+        """
+        After a trip, the aborted injection removes its effect before it
+        releases its guard. A request in that gap must hear "paused".
+        """
+        from src.lifecycle import lifecycle
+
+        ks, target = make_kill_switch()
+        ticket, _ = lifecycle.begin("network")  # the injection still unwinding
+        trip_it(ks, target)
+        response = client.post("/inject/manual", json={"failure_type": "network"})
+        assert response.status_code == 409
+        assert "Chaos paused" in response.json()["detail"]
+        lifecycle.end(ticket)
+
+    def test_already_running_is_still_reported_when_the_breaker_is_closed(self, client):
+        from src.lifecycle import lifecycle
+
+        make_kill_switch()
+        ticket, _ = lifecycle.begin("network")
+        response = client.post("/inject/manual", json={"failure_type": "network"})
+        assert response.status_code == 409
+        assert "already running" in response.json()["detail"]
+        lifecycle.end(ticket)

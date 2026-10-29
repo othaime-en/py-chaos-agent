@@ -498,22 +498,26 @@ async def manual_injection(
         if grant.clamped:
             clamped_to = grant.granted
 
-    if not request.dry_run:
-        if lifecycle.is_shutting_down():
-            raise HTTPException(status_code=503, detail="Agent is shutting down")
-        if lifecycle.is_active(failure_type):
-            raise HTTPException(
-                status_code=409,
-                detail=f"A {failure_type} injection is already running",
-            )
+    if not request.dry_run and lifecycle.is_shutting_down():
+        raise HTTPException(status_code=503, detail="Agent is shutting down")
 
     # The kill switch gates manual injections too: never inject into a target
     # that has been found unhealthy. Dry runs change nothing and are allowed.
+    # This comes before the "already running" check on purpose: when the breaker
+    # trips, the aborted injection removes its effect first and releases its
+    # guard a moment later. In that gap the honest answer is "paused", not
+    # "already running".
     ks = _active_kill_switch()
     if ks is not None and not request.dry_run:
         allowed, reason = ks.allows_injection()
         if not allowed:
             raise HTTPException(status_code=409, detail=f"Chaos paused: {reason}")
+
+    if not request.dry_run and lifecycle.is_active(failure_type):
+        raise HTTPException(
+            status_code=409,
+            detail=f"A {failure_type} injection is already running",
+        )
 
     logger.info(
         f"Manual injection requested: {failure_type}",
