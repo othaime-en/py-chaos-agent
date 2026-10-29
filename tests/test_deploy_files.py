@@ -22,7 +22,11 @@ REPO = Path(__file__).resolve().parent.parent
 
 def env_names_in_dockerfile():
     text = (REPO / "docker" / "Dockerfile").read_text()
-    return set(re.findall(r"^ENV\s+([A-Z_][A-Z0-9_]*)=", text, re.M))
+    names = set()
+    # An ENV instruction may continue over several lines with a trailing backslash.
+    for block in re.findall(r"^ENV\s+((?:.*\\\n)*.*)$", text, re.M):
+        names.update(re.findall(r"(?:^|\s)([A-Z_][A-Z0-9_]*)=", block))
+    return names
 
 
 def env_names_in_compose():
@@ -50,7 +54,14 @@ def source_text():
 
 
 # Variables the platform or the shell reads, not this code
-NOT_OURS = {"PATH", "PYTHONUNBUFFERED", "PYTHONPATH", "LANG", "HOME"}
+NOT_OURS = {
+    "PATH",
+    "PYTHONUNBUFFERED",
+    "PYTHONDONTWRITEBYTECODE",
+    "PYTHONPATH",
+    "LANG",
+    "HOME",
+}
 
 
 @pytest.mark.parametrize(
