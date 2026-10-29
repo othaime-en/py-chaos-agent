@@ -141,6 +141,28 @@ jobs:
       - name: Smoke test the demo
         run: scripts/k8s_smoke_test.sh
 
+  terraform:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: terraform
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: "1.10.5"
+
+      - name: Format
+        run: terraform fmt -check -recursive
+
+      # No backend and no credentials needed to validate the configuration.
+      - name: Validate
+        run: |
+          terraform init -backend=false -input=false
+          terraform validate
+
   coverage-badge:
     # Publishes the badge the README shows. Only on main, never on pull requests.
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
