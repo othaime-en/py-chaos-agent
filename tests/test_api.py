@@ -31,22 +31,15 @@ def _stop_agent_and_wait():
     Stop any agent loop and wait until its thread has really exited.
 
     Waiting matters: if a loop is still inside an injection when the next test
-    calls stop_event.clear(), the old thread resumes and keeps injecting into
+    starts the engine again, the old thread resumes and keeps injecting into
     every later test, bumping their metrics and reservations.
     """
-    agent_state.stop_event.set()
     if agent_state.kill_switch:
         agent_state.kill_switch.stop_monitoring()
         agent_state.kill_switch = None
-    thread = agent_state.agent_thread
-    if thread is not None and thread.is_alive():
-        thread.join(timeout=30)
-        if thread.is_alive():
-            pytest.fail(
-                "agent loop thread did not stop; it would leak into later tests"
-            )
+    if not agent_state.engine.stop(timeout=30):
+        pytest.fail("agent loop did not stop; it would leak into later tests")
     agent_state.enabled = False
-    agent_state.agent_thread = None
 
 
 @pytest.fixture(autouse=True)
@@ -58,11 +51,10 @@ def reset_agent_state(monkeypatch):
     burn CPU, allocate memory or touch the network while tests run. Tests that
     check injection behavior patch the injectors themselves.
     """
-    for name in ("inject_cpu", "inject_memory", "inject_process", "inject_network"):
-        monkeypatch.setattr(f"src.api.{name}", lambda *a, **k: None)
+    for name in ("cpu", "memory", "process", "network"):
+        monkeypatch.setattr(f"src.failures.{name}.inject_{name}", lambda *a, **k: None)
 
     _stop_agent_and_wait()
-    agent_state.stop_event.clear()
     try:
         agent_state.config = load_config()
     except Exception:
@@ -316,7 +308,9 @@ class TestInputValidation:
 
     def test_manual_injection_rejects_unbounded_cores(self, client, monkeypatch):
         called = []
-        monkeypatch.setattr("src.api.inject_cpu", lambda *a, **k: called.append(a))
+        monkeypatch.setattr(
+            "src.failures.cpu.inject_cpu", lambda *a, **k: called.append(a)
+        )
         response = client.post(
             "/inject/manual",
             json={"failure_type": "cpu", "config": {"cores": 100000}},
@@ -346,7 +340,7 @@ class TestInputValidation:
     def test_manual_injection_merges_partial_override(self, client, monkeypatch):
         seen = []
         monkeypatch.setattr(
-            "src.api.inject_cpu", lambda cfg, dry_run=False: seen.append(cfg)
+            "src.failures.cpu.inject_cpu", lambda cfg, dry_run=False: seen.append(cfg)
         )
         response = client.post(
             "/inject/manual",
@@ -528,7 +522,9 @@ class TestResourceBudgetApi:
 
     def test_manual_memory_over_budget_is_422(self, client, monkeypatch):
         called = []
-        monkeypatch.setattr("src.api.inject_memory", lambda *a, **k: called.append(1))
+        monkeypatch.setattr(
+            "src.failures.memory.inject_memory", lambda *a, **k: called.append(1)
+        )
         response = client.post(
             "/inject/manual",
             json={"failure_type": "memory", "config": {"mb": 900}},
@@ -540,7 +536,7 @@ class TestResourceBudgetApi:
         assert called == []
 
     def test_manual_memory_within_budget_is_accepted(self, client, monkeypatch):
-        monkeypatch.setattr("src.api.inject_memory", lambda *a, **k: None)
+        monkeypatch.setattr("src.failures.memory.inject_memory", lambda *a, **k: None)
         response = client.post(
             "/inject/manual",
             json={"failure_type": "memory", "config": {"mb": 100}},
@@ -550,7 +546,7 @@ class TestResourceBudgetApi:
     def test_manual_cpu_over_budget_is_clamped_and_reported(self, client, monkeypatch):
         seen = []
         monkeypatch.setattr(
-            "src.api.inject_cpu", lambda cfg, dry_run=False: seen.append(cfg)
+            "src.failures.cpu.inject_cpu", lambda cfg, dry_run=False: seen.append(cfg)
         )
         response = client.post(
             "/inject/manual",
@@ -560,7 +556,7 @@ class TestResourceBudgetApi:
         assert response.json()["clamped_cores"] == 3
 
     def test_manual_cpu_within_budget_has_no_clamp_field(self, client, monkeypatch):
-        monkeypatch.setattr("src.api.inject_cpu", lambda *a, **k: None)
+        monkeypatch.setattr("src.failures.cpu.inject_cpu", lambda *a, **k: None)
         response = client.post(
             "/inject/manual",
             json={"failure_type": "cpu", "config": {"cores": 2}},
@@ -581,8 +577,8 @@ class TestResourceBudgetApi:
     def test_other_failure_types_skip_the_resource_check(
         self, client, failure, monkeypatch
     ):
-        monkeypatch.setattr("src.api.inject_process", lambda *a, **k: None)
-        monkeypatch.setattr("src.api.inject_network", lambda *a, **k: None)
+        monkeypatch.setattr("src.failures.process.inject_process", lambda *a, **k: None)
+        monkeypatch.setattr("src.failures.network.inject_network", lambda *a, **k: None)
         response = client.post(
             "/inject/manual", json={"failure_type": failure, "dry_run": True}
         )
@@ -644,7 +640,9 @@ class TestInjectionLifecycleApi:
         from src.lifecycle import lifecycle
 
         called = []
-        monkeypatch.setattr("src.api.inject_network", lambda *a, **k: called.append(1))
+        monkeypatch.setattr(
+            "src.failures.network.inject_network", lambda *a, **k: called.append(1)
+        )
         lifecycle.begin("network")
         response = client.post("/inject/manual", json={"failure_type": "network"})
         assert response.status_code == 409
@@ -654,7 +652,7 @@ class TestInjectionLifecycleApi:
     def test_other_types_are_not_blocked(self, client, monkeypatch):
         from src.lifecycle import lifecycle
 
-        monkeypatch.setattr("src.api.inject_cpu", lambda *a, **k: None)
+        monkeypatch.setattr("src.failures.cpu.inject_cpu", lambda *a, **k: None)
         lifecycle.begin("network")
         response = client.post("/inject/manual", json={"failure_type": "cpu"})
         assert response.status_code == 200
@@ -662,7 +660,7 @@ class TestInjectionLifecycleApi:
     def test_dry_run_is_not_blocked(self, client, monkeypatch):
         from src.lifecycle import lifecycle
 
-        monkeypatch.setattr("src.api.inject_network", lambda *a, **k: None)
+        monkeypatch.setattr("src.failures.network.inject_network", lambda *a, **k: None)
         lifecycle.begin("network")
         response = client.post(
             "/inject/manual", json={"failure_type": "network", "dry_run": True}
@@ -697,7 +695,7 @@ class TestInjectionLifecycleApi:
         assert ticket.interrupted
         # Chaos is paused, not stopped: the loop is still running
         assert agent_state.enabled is True
-        assert not agent_state.stop_event.is_set()
+        assert agent_state.engine.is_running
 
     def test_lifespan_shutdown_aborts_and_cleans_up(self, monkeypatch):
         from src.lifecycle import lifecycle
@@ -812,7 +810,9 @@ class TestKillSwitchApi:
 
     def test_manual_injection_refused_while_tripped(self, client, monkeypatch):
         called = []
-        monkeypatch.setattr("src.api.inject_cpu", lambda *a, **k: called.append(1))
+        monkeypatch.setattr(
+            "src.failures.cpu.inject_cpu", lambda *a, **k: called.append(1)
+        )
         ks, target = make_kill_switch()
         trip_it(ks, target)
         response = client.post("/inject/manual", json={"failure_type": "cpu"})
@@ -821,7 +821,7 @@ class TestKillSwitchApi:
         assert called == []
 
     def test_manual_dry_run_allowed_while_tripped(self, client, monkeypatch):
-        monkeypatch.setattr("src.api.inject_cpu", lambda *a, **k: None)
+        monkeypatch.setattr("src.failures.cpu.inject_cpu", lambda *a, **k: None)
         ks, target = make_kill_switch()
         trip_it(ks, target)
         response = client.post(
@@ -831,7 +831,9 @@ class TestKillSwitchApi:
 
     def test_manual_injection_allowed_when_closed(self, client, monkeypatch):
         called = []
-        monkeypatch.setattr("src.api.inject_cpu", lambda *a, **k: called.append(1))
+        monkeypatch.setattr(
+            "src.failures.cpu.inject_cpu", lambda *a, **k: called.append(1)
+        )
         make_kill_switch()
         assert (
             client.post("/inject/manual", json={"failure_type": "cpu"}).status_code
@@ -845,7 +847,7 @@ class TestKillSwitchApi:
         ks, _ = make_kill_switch()
         seen = []
         monkeypatch.setattr(
-            "src.api.inject_cpu",
+            "src.failures.cpu.inject_cpu",
             lambda *a, **k: seen.append(ks.failure_context.get_active_injections()),
         )
         client.post("/inject/manual", json={"failure_type": "cpu"})
@@ -853,13 +855,13 @@ class TestKillSwitchApi:
         assert ks.failure_context.get_active_injections() == set()
 
     def test_manual_process_kill_earns_a_grace_period(self, client, monkeypatch):
-        monkeypatch.setattr("src.api.inject_process", lambda *a, **k: None)
+        monkeypatch.setattr("src.failures.process.inject_process", lambda *a, **k: None)
         ks, _ = make_kill_switch()
         client.post("/inject/manual", json={"failure_type": "process"})
         assert ks.failure_context.is_in_process_kill_grace_period(60)
 
     def test_manual_dry_run_process_earns_no_grace(self, client, monkeypatch):
-        monkeypatch.setattr("src.api.inject_process", lambda *a, **k: None)
+        monkeypatch.setattr("src.failures.process.inject_process", lambda *a, **k: None)
         ks, _ = make_kill_switch()
         client.post("/inject/manual", json={"failure_type": "process", "dry_run": True})
         assert not ks.failure_context.is_in_process_kill_grace_period(60)
@@ -871,7 +873,9 @@ class TestKillSwitchApi:
         from src.kill_switch import KillSwitchOpen
 
         called = []
-        monkeypatch.setattr("src.api.inject_cpu", lambda *a, **k: called.append(1))
+        monkeypatch.setattr(
+            "src.failures.cpu.inject_cpu", lambda *a, **k: called.append(1)
+        )
         ks, _ = make_kill_switch()
 
         def refuse(*a, **k):
@@ -906,7 +910,7 @@ class TestKillSwitchApi:
         body = client.post("/agent/start?enable_kill_switch=false").json()
         assert body["kill_switch_enabled"] is False
         # Bypassed: manual injection is no longer gated
-        monkeypatch.setattr("src.api.inject_cpu", lambda *a, **k: None)
+        monkeypatch.setattr("src.failures.cpu.inject_cpu", lambda *a, **k: None)
         assert (
             client.post("/inject/manual", json={"failure_type": "cpu"}).status_code
             == 200
@@ -991,7 +995,7 @@ class TestKillSwitchApi:
         client.post("/agent/start")
         trip_it(ks, target)
         assert agent_state.enabled is True
-        assert not agent_state.stop_event.is_set()
+        assert agent_state.engine.is_running
         assert client.get("/status").json()["paused_by_kill_switch"] is True
 
     def test_loop_pauses_while_tripped_and_resumes_after_recovery(
@@ -1000,7 +1004,9 @@ class TestKillSwitchApi:
         import time as _time
 
         count = []
-        monkeypatch.setattr("src.api.inject_cpu", lambda *a, **k: count.append(1))
+        monkeypatch.setattr(
+            "src.failures.cpu.inject_cpu", lambda *a, **k: count.append(1)
+        )
         for name, cfg in agent_state.config.failures.items():
             cfg["enabled"] = name == "cpu"
         agent_state.config.failures["cpu"]["probability"] = 1.0
@@ -1091,7 +1097,7 @@ class TestKillSwitchWiring:
         ks, target = make_kill_switch()
         trip_it(ks, target)
         ks.config.enabled = False  # e.g. config reloaded with enabled: false
-        monkeypatch.setattr("src.api.inject_cpu", lambda *a, **k: None)
+        monkeypatch.setattr("src.failures.cpu.inject_cpu", lambda *a, **k: None)
         assert (
             client.post("/inject/manual", json={"failure_type": "cpu"}).status_code
             == 200
@@ -1104,7 +1110,9 @@ class TestProcessTargetingApi:
 
     def test_pid_1_is_rejected_up_front(self, client, monkeypatch):
         called = []
-        monkeypatch.setattr("src.api.inject_process", lambda *a, **k: called.append(1))
+        monkeypatch.setattr(
+            "src.failures.process.inject_process", lambda *a, **k: called.append(1)
+        )
         response = client.post(
             "/inject/manual",
             json={"failure_type": "process", "config": {"target_pid": 1}},
@@ -1123,7 +1131,8 @@ class TestProcessTargetingApi:
     def test_pid_override_is_merged_onto_the_stored_target(self, client, monkeypatch):
         seen = []
         monkeypatch.setattr(
-            "src.api.inject_process", lambda cfg, dry_run=False: seen.append(cfg)
+            "src.failures.process.inject_process",
+            lambda cfg, dry_run=False: seen.append(cfg),
         )
         response = client.post(
             "/inject/manual",
@@ -1229,13 +1238,13 @@ class TestAutoStart:
         self._with_auto_start(monkeypatch, False)
         with TestClient(app):
             assert agent_state.enabled is False
-            assert agent_state.agent_thread is None
+            assert not agent_state.engine.is_running
 
     def test_auto_start_begins_the_loop_when_the_api_starts(self, monkeypatch):
         self._with_auto_start(monkeypatch, True)
         with TestClient(app) as client:
             assert agent_state.enabled is True
-            assert agent_state.agent_thread.is_alive()
+            assert agent_state.engine.is_running
             headers = {"Authorization": f"Bearer {TEST_TOKEN}"}
             assert client.get("/status", headers=headers).json()["enabled"] is True
 
@@ -1255,7 +1264,7 @@ class TestAutoStart:
     def test_shutdown_stops_an_auto_started_loop(self, monkeypatch):
         self._with_auto_start(monkeypatch, True)
         with TestClient(app):
-            thread = agent_state.agent_thread
+            thread = agent_state.engine.thread
         thread.join(timeout=10)
         assert not thread.is_alive()
 
@@ -1274,8 +1283,10 @@ class TestProbabilityInTheRealLoop:
         import time as _time
 
         calls = []
-        monkeypatch.setattr("src.api.inject_cpu", lambda *a, **k: calls.append(1))
-        monkeypatch.setattr("src.api.random.random", lambda: 0.0)
+        monkeypatch.setattr(
+            "src.failures.cpu.inject_cpu", lambda *a, **k: calls.append(1)
+        )
+        monkeypatch.setattr("random.random", lambda: 0.0)
         for name, cfg in agent_state.config.failures.items():
             cfg["enabled"] = name == "cpu"
         agent_state.config.failures["cpu"]["probability"] = 0.0
@@ -1322,3 +1333,219 @@ class TestMetricsEndpoints:
         INJECTIONS_TOTAL.labels(failure_type="cpu", status="success").inc(5)
         assert client.post("/metrics/reset").status_code == 200
         assert metric_value(INJECTIONS_TOTAL, failure_type="cpu", status="success") == 0
+
+
+class TestSharedEngine:
+    """The API drives the same engine as the standalone agent."""
+
+    def _only(self, *names):
+        for name, cfg in agent_state.config.failures.items():
+            cfg["enabled"] = name in names
+            cfg["probability"] = 1.0
+        agent_state.config.agent.interval_seconds = 1
+        agent_state.config.agent.dry_run = False
+
+    def _holding_injector(self, name, entered):
+        from src.lifecycle import lifecycle
+
+        def inject(cfg, dry_run=False):
+            with lifecycle.injection(name) as ticket:
+                if ticket is None:
+                    return
+                entered.append(name)
+                ticket.sleep(30)
+
+        return inject
+
+    def _wait_for(self, predicate, timeout=6):
+        import time as _time
+
+        deadline = _time.time() + timeout
+        while _time.time() < deadline:
+            if predicate():
+                return True
+            _time.sleep(0.05)
+        return False
+
+    def test_faults_overlap_and_status_lists_them(self, client, monkeypatch):
+        entered = []
+        for name in ("cpu", "memory"):
+            monkeypatch.setattr(
+                f"src.failures.{name}.inject_{name}",
+                self._holding_injector(name, entered),
+            )
+        self._only("cpu", "memory")
+        client.post("/agent/start")
+        assert self._wait_for(lambda: sorted(entered) == ["cpu", "memory"])
+        active = client.get("/status").json()["active_injections"]
+        assert active == ["cpu", "memory"]
+
+    def test_the_loop_is_not_blocked_by_a_long_injection(self, client, monkeypatch):
+        entered = []
+        monkeypatch.setattr(
+            "src.failures.cpu.inject_cpu", self._holding_injector("cpu", entered)
+        )
+        self._only("cpu")
+        client.post("/agent/start")
+        assert self._wait_for(lambda: entered == ["cpu"])
+        assert self._wait_for(lambda: agent_state.engine.iteration >= 3, timeout=8)
+
+    def test_stop_removes_running_injections_before_returning(
+        self, client, monkeypatch
+    ):
+        import time as _time
+
+        entered = []
+        finished = []
+
+        def inject(cfg, dry_run=False):
+            from src.lifecycle import lifecycle
+
+            with lifecycle.injection("cpu") as ticket:
+                if ticket is None:
+                    return
+                entered.append(1)
+                try:
+                    ticket.sleep(30)
+                finally:
+                    finished.append(1)
+
+        monkeypatch.setattr("src.failures.cpu.inject_cpu", inject)
+        self._only("cpu")
+        client.post("/agent/start")
+        assert self._wait_for(lambda: entered)
+        started = _time.time()
+        assert client.post("/agent/stop").status_code == 200
+        assert _time.time() - started < 5
+        assert finished, "stop returned before the injection cleaned up"
+        assert agent_state.engine.in_flight() == 0
+        assert agent_state.enabled is False
+
+    def test_the_loop_ending_clears_enabled(self, client):
+        client.post("/agent/start")
+        assert agent_state.enabled is True
+        agent_state.engine.stop(timeout=5)
+        assert self._wait_for(lambda: agent_state.enabled is False)
+
+    def test_status_uptime_comes_from_the_engine(self, client):
+        client.post("/agent/start")
+        body = client.get("/status").json()
+        assert body["enabled"] is True
+        assert body["uptime_seconds"] is not None
+        assert body["uptime_seconds"] >= 0
+
+    def test_a_missing_config_does_not_kill_the_loop(self, client, monkeypatch):
+        from src import api
+
+        client.post("/agent/start")
+        saved = agent_state.config
+        agent_state.config = None
+        try:
+            assert api._settings_snapshot() is None
+            import time as _time
+
+            _time.sleep(0.3)
+            assert agent_state.engine.is_running
+        finally:
+            agent_state.config = saved
+
+
+class TestConfigIsReadAtomically:
+    def test_the_snapshot_waits_for_a_write_in_progress(self):
+        import threading
+
+        from src import api
+
+        done = threading.Event()
+        taken = []
+
+        def reader():
+            taken.append(api._settings_snapshot())
+            done.set()
+
+        with agent_state.config_lock:
+            t = threading.Thread(target=reader)
+            t.start()
+            assert not done.wait(0.3), "snapshot did not wait for the config lock"
+        assert done.wait(5)
+        t.join()
+        assert taken[0] is not None
+
+    def test_patching_never_exposes_a_half_applied_config(self, client):
+        """
+        Alternate between two internally consistent configs through PATCH while
+        a reader snapshots continuously. Each snapshot must match one of them in
+        full, never a mixture.
+        """
+        import threading
+
+        from src import api
+
+        a = {"interval_seconds": 1, "dry_run": False, "cpu": 0.1}
+        b = {"interval_seconds": 2, "dry_run": True, "cpu": 0.9}
+        stop = threading.Event()
+        torn = []
+
+        def reader():
+            while not stop.is_set():
+                s = api._settings_snapshot()
+                pair = (s.interval_seconds, s.dry_run, s.failures["cpu"]["probability"])
+                if pair not in {(1, False, 0.1), (2, True, 0.9)}:
+                    torn.append(pair)
+
+        # Start from a known state so every snapshot is one of the two.
+        client.patch(
+            "/config",
+            json={
+                "interval_seconds": a["interval_seconds"],
+                "dry_run": a["dry_run"],
+                "failures": {"cpu": {"probability": a["cpu"]}},
+            },
+        )
+        t = threading.Thread(target=reader)
+        t.start()
+        try:
+            for i in range(60):
+                c = a if i % 2 else b
+                response = client.patch(
+                    "/config",
+                    json={
+                        "interval_seconds": c["interval_seconds"],
+                        "dry_run": c["dry_run"],
+                        "failures": {"cpu": {"probability": c["cpu"]}},
+                    },
+                )
+                assert response.status_code == 200
+        finally:
+            stop.set()
+            t.join()
+        assert torn == []
+
+
+class TestPausedWinsOverAlreadyRunning:
+    def test_a_tripped_breaker_is_reported_even_while_the_aborted_injection_unwinds(
+        self, client
+    ):
+        """
+        After a trip, the aborted injection removes its effect before it
+        releases its guard. A request in that gap must hear "paused".
+        """
+        from src.lifecycle import lifecycle
+
+        ks, target = make_kill_switch()
+        ticket, _ = lifecycle.begin("network")  # the injection still unwinding
+        trip_it(ks, target)
+        response = client.post("/inject/manual", json={"failure_type": "network"})
+        assert response.status_code == 409
+        assert "Chaos paused" in response.json()["detail"]
+        lifecycle.end(ticket)
+
+    def test_already_running_is_still_reported_when_the_breaker_is_closed(self, client):
+        from src.lifecycle import lifecycle
+
+        make_kill_switch()
+        ticket, _ = lifecycle.begin("network")
+        response = client.post("/inject/manual", json={"failure_type": "network"})
+        assert response.status_code == 409
+        assert "already running" in response.json()["detail"]
+        lifecycle.end(ticket)

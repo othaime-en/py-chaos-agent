@@ -37,7 +37,9 @@ python -c "import psutil, yaml, prometheus_client; print('Dependencies OK')"
 py-chaos-agent/
 ├── src/
 │   ├── __init__.py
-│   ├── agent.py              # Main agent loop
+│   ├── agent.py              # Standalone entry point
+│   ├── api.py                # REST API entry point
+│   ├── engine.py             # The injection loop both entry points run
 │   ├── config.py             # Configuration loading
 │   ├── metrics.py            # Prometheus metrics
 │   └── failures/
@@ -180,10 +182,10 @@ def inject_disk(config: dict, dry_run: bool = False):
         INJECTION_ACTIVE.labels(failure_type="disk").set(0)
 ```
 
-**2. Register in agent.py**
+**2. Register in engine.py**
 
 ```python
-# src/agent.py
+# src/engine.py
 FAILURE_MODULES = {
     "cpu": ".failures.cpu",
     "memory": ".failures.memory",

@@ -1,33 +1,17 @@
-import time
-import random
-import importlib
 import signal
 import sys
-import uuid
 import logging
 from .config import load_config, validate_config
 from .metrics import MetricsServerError, metrics_port_from_env, start_metrics_server
 from .resources import apply_settings_and_report
 from .failures.network import reconcile_stale_rules
-from .chance import should_inject
-from .kill_switch import KillSwitch, KillSwitchOpen
+from .engine import ChaosEngine, snapshot_settings
+from .kill_switch import KillSwitch
 from .lifecycle import lifecycle
-from .logging_config import (
-    setup_logging,
-    get_logger,
-    set_correlation_id,
-    log_failure_injection,
-)
+from .logging_config import setup_logging, get_logger
 
 # Logger will be initialized after config is loaded
 logger: logging.Logger
-
-FAILURE_MODULES = {
-    "cpu": ".failures.cpu",
-    "memory": ".failures.memory",
-    "process": ".failures.process",
-    "network": ".failures.network",
-}
 
 
 def cleanup_on_exit():
@@ -134,138 +118,24 @@ def main():
         },
     )
 
-    # Main loop
-    iteration = 0
-    paused = False
-    while not lifecycle.is_shutting_down():
-        try:
-            iteration += 1
-            if paused and kill_switch.allows_injection()[0]:
-                logger.info("Kill switch closed, chaos resuming")
-                paused = False
-            # Create correlation ID for this iteration
-            correlation_id = f"iter-{iteration}-{uuid.uuid4().hex[:8]}"
-            set_correlation_id(correlation_id)
+    # The same engine drives the API mode. The config never changes in this
+    # mode, so each tick just snapshots it.
+    engine = ChaosEngine(
+        settings_provider=lambda: snapshot_settings(config),
+        kill_switch_provider=lambda: (
+            kill_switch if config.kill_switch.enabled else None
+        ),
+        name="chaos-agent",
+    )
+    engine.start()
 
-            logger.debug(
-                "Starting chaos iteration",
-                extra={"iteration": iteration, "correlation_id": correlation_id},
-            )
-
-            injections_attempted = 0
-            injections_executed = 0
-
-            for name, cfg in config.failures.items():
-                if not cfg["enabled"]:
-                    logger.debug(
-                        "Failure type disabled, skipping", extra={"failure_type": name}
-                    )
-                    continue
-
-                probability = cfg["probability"]
-                roll = random.random()
-
-                if not should_inject(probability, roll):
-                    logger.debug(
-                        "Probability check failed, skipping injection",
-                        extra={
-                            "failure_type": name,
-                            "probability": probability,
-                            "roll": round(roll, 3),
-                        },
-                    )
-                    continue
-
-                injections_attempted += 1
-
-                logger.info(
-                    "Probability check passed, injecting failure",
-                    extra={
-                        "failure_type": name,
-                        "probability": probability,
-                        "roll": round(roll, 3),
-                        "dry_run": config.agent.dry_run,
-                    },
-                )
-
-                try:
-                    module = importlib.import_module(
-                        FAILURE_MODULES[name], package=__package__
-                    )
-                    inject_func = getattr(module, f"inject_{name}")
-
-                    log_failure_injection(
-                        logger,
-                        failure_type=name,
-                        action="start",
-                        status="executing",
-                        config=cfg,
-                    )
-
-                    with kill_switch.injection(name, config.agent.dry_run):
-                        inject_func(cfg, dry_run=config.agent.dry_run)
-                    injections_executed += 1
-
-                    log_failure_injection(
-                        logger, failure_type=name, action="complete", status="success"
-                    )
-
-                except KillSwitchOpen as e:
-                    # Paused, not stopped: skip the rest of this tick and try
-                    # again next interval. Resumes by itself after recovery.
-                    if not paused:
-                        logger.warning(
-                            "Chaos paused by kill switch", extra={"reason": e.reason}
-                        )
-                        paused = True
-                    break
-
-                except Exception as e:
-                    logger.error(
-                        "Failure injection raised exception",
-                        exc_info=True,
-                        extra={
-                            "failure_type": name,
-                            "error": str(e),
-                            "error_type": type(e).__name__,
-                        },
-                    )
-
-                    log_failure_injection(
-                        logger,
-                        failure_type=name,
-                        action="failed",
-                        status="error",
-                        error=str(e),
-                    )
-
-            logger.debug(
-                "Chaos iteration complete",
-                extra={
-                    "iteration": iteration,
-                    "injections_attempted": injections_attempted,
-                    "injections_executed": injections_executed,
-                },
-            )
-
-            logger.debug(f"Sleeping for {config.agent.interval_seconds} seconds")
-            time.sleep(config.agent.interval_seconds)
-
-        except KeyboardInterrupt:
-            logger.info("Keyboard interrupt received")
-            break
-        except Exception as e:
-            logger.critical(
-                "Unexpected error in main loop",
-                exc_info=True,
-                extra={
-                    "iteration": iteration,
-                    "error": str(e),
-                    "error_type": type(e).__name__,
-                },
-            )
-            # Continue running despite errors
-            time.sleep(config.agent.interval_seconds)
+    try:
+        # Block here. SIGTERM and SIGINT run signal_handler, which cleans up and
+        # raises SystemExit; the engine thread is a daemon, so it goes with us.
+        while engine.is_running:
+            engine.join(timeout=1.0)
+    finally:
+        engine.stop()
 
 
 if __name__ == "__main__":
