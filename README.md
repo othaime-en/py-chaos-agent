@@ -1,7 +1,7 @@
 # Py-Chaos-Agent
 
 ![CI/CD](https://github.com/othaime-en/py-chaos-agent/workflows/CI/CD/badge.svg)
-![Python](https://img.shields.io/badge/python-3.10-blue)
+![Python](https://img.shields.io/badge/python-3.12-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Coverage](https://img.shields.io/badge/coverage-92%25-brightgreen)
 
@@ -152,7 +152,7 @@ The agent includes self-protection mechanisms to avoid terminating itself, but a
 
 ### Prerequisites
 
-- Python 3.10+
+- Python 3.12+
 - Docker and Docker Compose
 - kubectl (for Kubernetes testing)
 - Terraform (for AWS deployment)

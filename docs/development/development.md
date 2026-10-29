@@ -4,7 +4,7 @@
 
 ### Prerequisites
 
-- Python 3.10 or higher
+- Python 3.12 or higher
 - Docker and Docker Compose
 - Git
 - Virtual environment tool (venv, virtualenv, or conda)

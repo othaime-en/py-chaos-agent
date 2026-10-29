@@ -6,7 +6,7 @@ This guide covers the different ways to install and run Py-Chaos-Agent.
 
 Before installing Py-Chaos-Agent, ensure you have:
 
-- Python 3.10 or higher
+- Python 3.12 or higher
 - Docker (for containerized deployment)
 - kubectl (for Kubernetes deployment)
 - Access to a test environment
@@ -101,7 +101,7 @@ source venv/bin/activate
 pytest
 
 # Check Python version
-python --version  # Should be 3.10+
+python --version  # Should be 3.12+
 ```
 
 ## Next Steps
@@ -129,14 +129,14 @@ docker-compose --version
 
 ### Python Version Issues
 
-Ensure you're using Python 3.10+:
+Ensure you're using Python 3.12+:
 
 ```bash
 # Check Python version
 python --version
 
-# If needed, specify python3.10
-python3.10 -m venv venv
+# If needed, specify python3.12
+python3.12 -m venv venv
 ```
 
 ### Permission Issues
