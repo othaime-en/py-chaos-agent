@@ -150,3 +150,53 @@ class TestSupplyChain:
     def test_python_version_is_consistent(self):
         assert "python_version = 3.12" in text("mypy.ini")
         assert 'python-version: "3.12"' in text(".github", "workflows", "ci.yml")
+
+
+class TestTerraform:
+    def tf(self, name):
+        return text("terraform", name)
+
+    def test_state_is_remote_and_locked(self):
+        assert 'backend "s3"' in self.tf("backend.tf")
+        example = self.tf("backend.hcl.example")
+        assert "use_lockfile = true" in example
+        assert "encrypt      = true" in example
+
+    def test_the_backend_file_with_real_values_is_not_committed(self):
+        assert "backend.hcl" in text(".gitignore").splitlines()
+
+    def test_only_the_providers_that_are_used_remain(self):
+        versions = self.tf("versions.tf")
+        assert "hashicorp/aws" in versions
+        for unused in ("helm", "kubernetes"):
+            assert f'source  = "hashicorp/{unused}"' not in versions
+            assert f'provider "{unused}"' not in self.tf("provider.tf")
+        assert "aws_caller_identity" not in self.tf("provider.tf")
+
+    def test_native_state_locking_needs_terraform_1_10(self):
+        assert 'required_version = ">= 1.10"' in self.tf("versions.tf")
+
+    @pytest.mark.parametrize("repo", ["chaos_agent", "target_app"])
+    def test_registries_are_immutable_and_scanned(self, repo):
+        ecr = self.tf("ecr.tf")
+        block = ecr.split(f'resource "aws_ecr_repository" "{repo}"')[1].split(
+            "\nresource"
+        )[0]
+        assert 'image_tag_mutability = "IMMUTABLE"' in block
+        assert "scan_on_push = true" in block
+        assert "encryption_configuration" in block
+
+    def test_the_cluster_endpoint_can_be_closed(self):
+        eks = self.tf("eks.tf")
+        for name in ("private_access", "public_access", "public_access_cidrs"):
+            assert f"cluster_endpoint_{name}" in eks
+            assert f'variable "cluster_endpoint_{name}"' in self.tf("variables.tf")
+
+    def test_an_open_endpoint_is_flagged_on_every_plan(self):
+        assert 'check "cluster_endpoint_is_not_open_to_the_internet"' in self.tf(
+            "eks.tf"
+        )
+
+    def test_ci_validates_terraform(self):
+        ci = text(".github", "workflows", "ci.yml")
+        assert "terraform fmt -check" in ci and "terraform validate" in ci

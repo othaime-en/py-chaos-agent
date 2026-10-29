@@ -33,6 +33,7 @@ crash.log
 override.tf
 override.tf.json
 *.tfvars
+backend.hcl
 
 
 # Local secrets

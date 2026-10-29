@@ -1,0 +1,7 @@
+# Copy to backend.hcl (git-ignored) and edit. Used as:
+#   terraform init -backend-config=backend.hcl
+bucket       = "my-org-terraform-state"
+key          = "py-chaos-agent/terraform.tfstate"
+region       = "us-east-1"
+encrypt      = true
+use_lockfile = true
