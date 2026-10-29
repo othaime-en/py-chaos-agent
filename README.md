@@ -165,7 +165,7 @@ python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 
 # Install dependencies
-pip install -r requirements.txt -r requirements-dev.txt
+pip install --require-hashes -r requirements-dev.txt
 
 # Run tests
 pytest

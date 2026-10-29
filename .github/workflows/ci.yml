@@ -20,14 +20,14 @@ jobs:
         run: |
           python -m venv venv
           source venv/bin/activate
-          pip install -r requirements.txt -r requirements-dev.txt
+          pip install --require-hashes -r requirements-dev.txt
 
       - name: Lint
         run: |
           source venv/bin/activate
           black --check src tests
           flake8 src tests
-          mypy src --install-types --non-interactive
+          mypy src
 
       - name: Test with coverage
         run: |

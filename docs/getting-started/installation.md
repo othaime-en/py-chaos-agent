@@ -52,11 +52,11 @@ cd py-chaos-agent
 python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 
-# Install dependencies
-pip install -r requirements.txt
+# Install dependencies (hash-verified)
+pip install --require-hashes -r requirements.txt
 
-# Install development dependencies (optional)
-pip install -r requirements-dev.txt
+# Or install everything for development (includes the runtime set)
+pip install --require-hashes -r requirements-dev.txt
 ```
 
 ## Kubernetes Installation

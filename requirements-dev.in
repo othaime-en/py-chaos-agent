@@ -1,0 +1,19 @@
+# Development and CI dependencies (direct only). Includes the runtime set.
+# Edit this file, then run `make lock`. The pinned set is requirements-dev.txt.
+-r requirements.in
+
+# Tests
+pytest==8.3.3
+pytest-cov==5.0.0
+httpx==0.28.1  # FastAPI TestClient
+
+# Lint and types
+black
+flake8
+mypy
+types-psutil
+types-PyYAML
+types-requests
+
+# Supply chain
+pip-audit

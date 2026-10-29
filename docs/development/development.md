@@ -25,7 +25,7 @@ source venv/bin/activate  # On Linux/Mac
 venv\Scripts\activate     # On Windows
 
 # Install dependencies
-pip install -r requirements.txt -r requirements-dev.txt
+pip install --require-hashes -r requirements-dev.txt
 
 # Verify installation
 python -c "import psutil, yaml, prometheus_client; print('Dependencies OK')"
@@ -67,8 +67,11 @@ py-chaos-agent/
 │   └── *.md                  # Documentation
 ├── config.yaml               # Default configuration
 ├── docker-compose.yml        # Local development setup
-├── requirements.txt          # Runtime dependencies
-├── requirements-dev.txt      # Development dependencies
+├── requirements.in           # Runtime dependencies (edit this)
+├── requirements.txt          # Runtime lockfile, hash-pinned (generated)
+├── requirements-dev.in       # Dev and CI dependencies (edit this)
+├── requirements-dev.txt      # Dev lockfile, hash-pinned (generated)
+├── Makefile                  # `make lock` regenerates the lockfiles
 └── README.md
 ```
 
@@ -612,3 +615,14 @@ Brief description of changes
 - **Discussions**: Use GitHub discussions for questions
 - **Documentation**: Check docs/ folder for detailed guides
 - **Examples**: See examples/ folder for use cases
+
+## Changing dependencies
+
+Dependencies are pinned with hashes, so a changed or tampered package fails to install.
+
+1. Edit `requirements.in` (runtime) or `requirements-dev.in` (tests, lint, CI tools).
+2. Run `make lock` on Python 3.12. It rewrites `requirements.txt` and `requirements-dev.txt`.
+3. Commit the `.in` and `.txt` files together.
+
+`make lock-upgrade` moves every transitive dependency to the newest allowed release.
+CI runs `pip-audit` against the runtime lockfile and fails on any known vulnerability.
