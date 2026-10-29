@@ -76,10 +76,27 @@ spec:
         app: resilient-app
     spec:
       shareProcessNamespace: true
+      # Pod-wide defaults. Both containers run as unprivileged users (the images
+      # set UIDs 10002 and 10001); runAsNonRoot makes the kubelet refuse to start
+      # a container that would run as root.
+      securityContext:
+        runAsNonRoot: true
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: target-app
-          image: target-app:latest
+          # Pinned tag, never :latest. Build it with:
+          #   docker build -t target-app:1.0.0 -f docker/Dockerfile.target .
+          image: target-app:1.0.0
           imagePullPolicy: Never
+          securityContext:
+            runAsUser: 10002
+            runAsGroup: 10002
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
           ports:
             - containerPort: 8080
           resources:
@@ -91,7 +108,9 @@ spec:
               memory: 256Mi
 
         - name: chaos-agent
-          image: py-chaos-agent:latest
+          # Pinned tag, never :latest. Build it with:
+          #   docker build -t py-chaos-agent:1.0.0 -f docker/Dockerfile .
+          image: py-chaos-agent:1.0.0
           imagePullPolicy: Never
           # These limits are the blast-radius boundary for CPU and memory
           # injections: the kernel enforces them, and the agent sizes its
@@ -110,13 +129,23 @@ spec:
               subPath: config.yaml
             - name: logs
               mountPath: /var/log/chaos-agent
+            # The root filesystem is read-only; /tmp is the only other place
+            # the agent may write.
+            - name: tmp
+              mountPath: /tmp
             - name: api-token
               mountPath: /var/run/secrets/chaos-api
               readOnly: true
           securityContext:
+            runAsUser: 10001
+            runAsGroup: 10001
             allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
             seccompProfile:
               type: RuntimeDefault
+            # The image gives these two to its interpreter as file capabilities
+            # (see docker/Dockerfile). They must be granted here too: that is
+            # what allows them. Without them the container will not start.
             capabilities:
               drop: ["ALL"]
               add:
@@ -164,6 +193,10 @@ spec:
             name: chaos-config
         - name: logs
           emptyDir: {}
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi
         # Create before applying (pod will not start without it):
         #   kubectl -n chaos-demo create secret generic chaos-api-token \
         #     --from-literal=token="$(openssl rand -hex 32)"
@@ -203,3 +236,60 @@ spec:
       targetPort: 8000
       protocol: TCP
   type: ClusterIP
+---
+# Network policy. Everything is denied, then only what the demo needs is allowed.
+# The control API (9000) is not reachable from other pods; use port-forward.
+# Kubelet probes and `kubectl port-forward` are not filtered by NetworkPolicy.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: chaos-demo
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: resilient-app
+  namespace: chaos-demo
+spec:
+  podSelector:
+    matchLabels:
+      app: resilient-app
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # The target app, for other pods in this namespace.
+    - from:
+        - podSelector: {}
+      ports:
+        - protocol: TCP
+          port: 8080
+    # Prometheus metrics, from a namespace named "monitoring".
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 8000
+  egress:
+    # DNS only. The agent talks to the target over localhost (same pod), and
+    # neither container needs anything else.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

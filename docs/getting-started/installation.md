@@ -33,10 +33,10 @@ git clone https://github.com/othaime-en/py-chaos-agent.git
 cd py-chaos-agent
 
 # Build the chaos agent image
-docker build -t py-chaos-agent:latest -f docker/Dockerfile .
+docker build -t py-chaos-agent:1.0.0 -f docker/Dockerfile .
 
 # Build the target app image
-docker build -t target-app:latest -f docker/Dockerfile.target .
+docker build -t target-app:1.0.0 -f docker/Dockerfile.target .
 ```
 
 ## Local Development Installation
@@ -68,12 +68,12 @@ For Kubernetes deployment, you'll need:
 
 ```bash
 # Load images (for local testing with kind/minikube)
-kind load docker-image py-chaos-agent:latest
-kind load docker-image target-app:latest
+kind load docker-image py-chaos-agent:1.0.0
+kind load docker-image target-app:1.0.0
 
 # Or for minikube
-minikube image load py-chaos-agent:latest
-minikube image load target-app:latest
+minikube image load py-chaos-agent:1.0.0
+minikube image load target-app:1.0.0
 ```
 
 See the [Kubernetes Deployment](../user-guide/kubernetes.md) guide for detailed deployment instructions.

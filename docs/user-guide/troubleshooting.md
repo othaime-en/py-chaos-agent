@@ -42,7 +42,7 @@ kubectl describe pod -n chaos-demo <pod-name> | grep -A 10 Mounts
 
 ```bash
 # Rebuild Docker image with all dependencies
-docker build -t py-chaos-agent:latest -f docker/Dockerfile .
+docker build -t py-chaos-agent:1.0.0 -f docker/Dockerfile .
 
 # Verify requirements.txt includes all packages
 cat requirements.txt
@@ -410,7 +410,7 @@ kubectl describe pod -n chaos-demo <pod-name>
 ```bash
 # For local images (minikube/kind)
 eval $(minikube docker-env)  # or
-kind load docker-image py-chaos-agent:latest
+kind load docker-image py-chaos-agent:1.0.0
 
 # For ECR
 aws ecr get-login-password --region us-east-1 | \
