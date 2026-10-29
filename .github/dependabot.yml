@@ -1,0 +1,29 @@
+# Keeps pinned things current: GitHub Actions (pinned by commit SHA), Python
+# dependencies (hash-pinned lockfiles), base images and Terraform providers.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      python:
+        patterns: ["*"]
+
+  - package-ecosystem: docker
+    directory: /docker
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: terraform
+    directory: /terraform
+    schedule:
+      interval: weekly

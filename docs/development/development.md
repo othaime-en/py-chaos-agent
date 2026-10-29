@@ -626,3 +626,25 @@ Dependencies are pinned with hashes, so a changed or tampered package fails to i
 
 `make lock-upgrade` moves every transitive dependency to the newest allowed release.
 CI runs `pip-audit` against the runtime lockfile and fails on any known vulnerability.
+
+## Continuous integration
+
+`.github/workflows/ci.yml` runs five jobs:
+
+| Job | What it checks |
+| --- | --- |
+| `test` | `black`, `flake8`, `mypy`, then the tests. Fails under 90% coverage. |
+| `audit` | `pip-audit` on both lockfiles. Also runs every Monday, because new advisories appear without a commit. |
+| `docker` | Builds both images and scans them with Trivy. Fixable HIGH or CRITICAL findings fail the build. |
+| `kubernetes` | Builds the images, starts a kind cluster, deploys `k8s/chaos-demo.yaml` and runs `scripts/k8s_smoke_test.sh`. |
+| `coverage-badge` | On `main` only: publishes the README coverage badge to the `badges` branch. |
+
+Every third-party action is pinned to a full commit SHA, with the version in a comment.
+A tag can be moved to malicious code, and `aquasecurity/trivy-action` was attacked this way in
+March 2026. Dependabot proposes updates for actions, Python packages, base images and Terraform.
+
+Run the smoke test yourself against any cluster that has the images loaded:
+
+```bash
+scripts/k8s_smoke_test.sh
+```

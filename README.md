@@ -3,7 +3,7 @@
 ![CI/CD](https://github.com/othaime-en/py-chaos-agent/workflows/CI/CD/badge.svg)
 ![Python](https://img.shields.io/badge/python-3.12-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
-![Coverage](https://img.shields.io/badge/coverage-92%25-brightgreen)
+![Coverage](https://raw.githubusercontent.com/othaime-en/py-chaos-agent/badges/coverage.svg)
 
 A Python-based chaos engineering sidecar tool for testing the resilience of containerized applications. Py-Chaos-Agent runs alongside your application containers to inject controlled failures and validate system behavior under stress.
 
@@ -50,8 +50,8 @@ curl http://localhost:8080
 
 ```bash
 # Build and load images (for local testing with kind/minikube)
-docker build -t py-chaos-agent:latest -f docker/Dockerfile .
-docker build -t target-app:latest -f docker/Dockerfile.target .
+docker build -t py-chaos-agent:1.0.0 -f docker/Dockerfile .
+docker build -t target-app:1.0.0 -f docker/Dockerfile.target .
 
 # Deploy to Kubernetes (the pod needs the API token Secret to start)
 kubectl apply -f k8s/chaos-demo.yaml
