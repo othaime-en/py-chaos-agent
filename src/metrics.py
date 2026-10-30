@@ -47,7 +47,8 @@ AUTH_FAILURES_TOTAL = Counter(
     "chaos_auth_failures_total",
     "Rejected authentication attempts",
     # surface: api or metrics. reason: missing (no credential sent), invalid
-    # (wrong credential) or locked_out (refused during a lockout).
+    # (wrong credential), expired (a real token past its expiry) or locked_out
+    # (refused during a lockout).
     ["surface", "reason"],
 )
 
