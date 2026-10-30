@@ -20,7 +20,9 @@ RUN /opt/venv/bin/pip install --no-cache-dir --require-hashes -r /tmp/requiremen
 # ---------------------------------------------------------------------------
 FROM ${PYTHON_IMAGE}
 
-# tc comes from iproute2. libcap2-bin provides setcap and is removed again below.
+# tc comes from iproute2. libcap2-bin provides setcap (and getcap, used below to
+# check the result). Do not purge libcap2-bin afterwards: iproute2 depends on it,
+# so apt would remove iproute2 and tc along with it.
 # Debian package versions are not pinned (a pin breaks the build at every
 # security update); the image is scanned with Trivy in CI instead.
 # hadolint ignore=DL3008
@@ -54,10 +56,15 @@ COPY --from=build /opt/venv /opt/venv
 #
 # Setuid and setgid bits are stripped first so there is no other route to
 # privilege.
+# pipefail, so a failing getcap in the pipes below fails the build.
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 RUN find / -xdev -type f \( -perm -4000 -o -perm -2000 \) -exec chmod a-s {} + \
     && setcap cap_net_admin,cap_kill+ep /opt/venv/bin/python \
     && setcap cap_net_admin+ep "$(readlink -f "$(command -v tc)")" \
-    && apt-get purge -y --auto-remove libcap2-bin
+    && getcap /opt/venv/bin/python | grep -q cap_net_admin \
+    && getcap /opt/venv/bin/python | grep -q cap_kill \
+    && getcap "$(readlink -f "$(command -v tc)")" | grep -q cap_net_admin \
+    && tc -V
 
 WORKDIR /app
 COPY src/ ./src/

@@ -92,6 +92,21 @@ class TestImages:
         assert "--require-hashes" in dockerfile
         assert "cap_net_admin,cap_kill+ep" in dockerfile
 
+    def test_the_image_keeps_tc(self):
+        """
+        iproute2 (which provides tc) depends on libcap2-bin. Purging libcap2-bin
+        after setcap makes apt remove iproute2 too, and the image then builds
+        fine but cannot inject network latency.
+        """
+        dockerfile = text("docker", "Dockerfile")
+        assert "apt-get purge" not in dockerfile
+        assert "apt-get remove" not in dockerfile
+
+    def test_the_build_fails_if_the_capabilities_or_tc_are_missing(self):
+        dockerfile = text("docker", "Dockerfile")
+        assert "getcap" in dockerfile
+        assert "tc -V" in dockerfile
+
     def test_target_image_runs_unprivileged(self):
         assert re.search(r"^USER\s+10002", text("docker", "Dockerfile.target"), re.M)
 
