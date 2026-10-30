@@ -57,6 +57,9 @@ COPY --from=build /opt/venv /opt/venv
 # Setuid and setgid bits are stripped first so there is no other route to
 # privilege.
 # pipefail, so a failing getcap in the pipes below fails the build.
+# These checks only read file metadata. Do not run tc or the capable python here:
+# the build does not grant NET_ADMIN or KILL, and the kernel refuses to execute a
+# binary whose file capabilities exceed what the process may hold (EPERM, exit 126).
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 RUN find / -xdev -type f \( -perm -4000 -o -perm -2000 \) -exec chmod a-s {} + \
     && setcap cap_net_admin,cap_kill+ep /opt/venv/bin/python \
@@ -64,7 +67,7 @@ RUN find / -xdev -type f \( -perm -4000 -o -perm -2000 \) -exec chmod a-s {} + \
     && getcap /opt/venv/bin/python | grep -q cap_net_admin \
     && getcap /opt/venv/bin/python | grep -q cap_kill \
     && getcap "$(readlink -f "$(command -v tc)")" | grep -q cap_net_admin \
-    && tc -V
+    && dpkg -s iproute2 > /dev/null
 
 WORKDIR /app
 COPY src/ ./src/

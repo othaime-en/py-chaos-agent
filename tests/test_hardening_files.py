@@ -105,7 +105,18 @@ class TestImages:
     def test_the_build_fails_if_the_capabilities_or_tc_are_missing(self):
         dockerfile = text("docker", "Dockerfile")
         assert "getcap" in dockerfile
-        assert "tc -V" in dockerfile
+        assert "dpkg -s iproute2" in dockerfile
+
+    def test_the_build_does_not_execute_the_capable_binaries(self):
+        """
+        tc and the venv python carry file capabilities the build step is not
+        granted, so the kernel refuses to run them there (EPERM, exit 126). The
+        build may inspect them (getcap) but must not run them.
+        """
+        dockerfile = text("docker", "Dockerfile")
+        run = dockerfile.split("setcap cap_net_admin,cap_kill+ep")[1].split("\n\n")[0]
+        assert "tc -V" not in run
+        assert not re.search(r"&&\s+(tc|/opt/venv/bin/python)\b", run)
 
     def test_target_image_runs_unprivileged(self):
         assert re.search(r"^USER\s+10002", text("docker", "Dockerfile.target"), re.M)
