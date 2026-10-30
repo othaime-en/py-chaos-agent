@@ -226,3 +226,16 @@ class TestTerraform:
     def test_ci_validates_terraform(self):
         ci = text(".github", "workflows", "ci.yml")
         assert "terraform fmt -check" in ci and "terraform validate" in ci
+
+
+class TestSmokeTest:
+    def test_it_turns_off_the_demos_random_chaos(self):
+        """With auto_start on, the loop kills the target or slows the API in the
+        middle of the checks and the test flakes."""
+        script = text("scripts", "k8s_smoke_test.sh")
+        assert "auto_start: true/auto_start: false" in script
+        assert text("k8s", "chaos-demo.yaml").count("auto_start: true") == 1
+
+    def test_it_does_not_stop_a_loop_that_is_not_running(self):
+        """POST /agent/stop returns 400 when the loop is off."""
+        assert "/agent/stop" not in text("scripts", "k8s_smoke_test.sh")

@@ -4,7 +4,7 @@
 #
 # Needs: kubectl pointed at a cluster that already has the images
 # py-chaos-agent:1.0.0 and target-app:1.0.0 (for kind: `kind load docker-image`),
-# plus curl and openssl.
+# plus curl, jq and openssl.
 #
 # It proves what unit tests cannot:
 #   * both containers start with the hardened securityContext
@@ -59,7 +59,12 @@ wait_until() { # wait_until SECONDS DESCRIPTION command...
 }
 
 # ---------------------------------------------------------------- deploy
-kubectl apply -f "$MANIFEST"
+# The demo starts its own random chaos as soon as the API is up (auto_start).
+# That would kill the target or slow the API in the middle of the checks below,
+# so deploy it with the loop off. The checks start injections themselves.
+manifest=$(sed 's/auto_start: true/auto_start: false/' "$MANIFEST")
+grep -q 'auto_start: false' <<<"$manifest" || fail "auto_start not found in $MANIFEST"
+kubectl apply -f - <<<"$manifest"
 TOKEN=$(openssl rand -hex 32)
 kubectl -n "$NS" create secret generic chaos-api-token --from-literal=token="$TOKEN" \
   --dry-run=client -o yaml | kubectl apply -f -
@@ -101,8 +106,14 @@ code=$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:${PORT}/status"
 [ "$(api GET /status)" = "200" ] || fail "authenticated /status failed"
 ok "API rejects requests without the token and accepts it with"
 
-# Stop the demo's own random chaos so the checks below are deterministic.
-[ "$(api POST /agent/stop)" = "200" ] || fail "could not stop the agent loop"
+# No random chaos is running (auto_start is off), and the kill switch must be
+# closed or manual injections are refused with "Chaos paused".
+status_is_closed() {
+  api GET /status >/dev/null && jq -e '(.kill_switch_state // "closed") == "closed"' /tmp/smoke-body
+}
+wait_until 60 "kill switch closed" status_is_closed
+no_netem() { ! kubectl -n "$NS" exec "$APP" -c chaos-agent -- tc qdisc show dev eth0 | grep -q netem; }
+no_netem || fail "a netem qdisc is already present before the test injected one"
 
 # -------------------------------------------------------------- network
 [ "$(api POST /inject/manual '{"failure_type":"network"}')" = "200" ] \
@@ -111,10 +122,10 @@ wait_until 30 "netem qdisc on eth0" \
   bash -c "kubectl -n $NS exec $APP -c chaos-agent -- tc qdisc show dev eth0 | grep -q netem"
 ok "network injection installed a netem qdisc (NET_ADMIN works for a non-root user)"
 
-[ "$(api POST /agent/stop)" = "200" ] || fail "stop failed"
-wait_until 30 "netem qdisc removed" \
-  bash -c "! kubectl -n $NS exec $APP -c chaos-agent -- tc qdisc show dev eth0 | grep -q netem"
-ok "stopping the agent removed the qdisc"
+# The injection lasts duration_seconds (12 in the demo config) and must clean up
+# after itself.
+wait_until 60 "netem qdisc removed when the injection ended" no_netem
+ok "the qdisc was removed when the injection ended"
 
 # -------------------------------------------------------------- process
 before=$(kubectl -n "$NS" get pods -l app=resilient-app \
