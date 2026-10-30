@@ -190,3 +190,98 @@ class TestValidateStartup:
         monkeypatch.setenv(auth.AUTH_DISABLED_ENV, "true")
         with pytest.raises(SystemExit, match="non-loopback"):
             auth.validate_startup("0.0.0.0", insecure_no_auth=False)
+
+
+class TestLockout:
+    """Repeated failed authentication locks the client out."""
+
+    @pytest.fixture(autouse=True)
+    def throttle_env(self, monkeypatch):
+        monkeypatch.setenv(auth.TOKEN_ENV, TOKEN)
+        monkeypatch.setenv("CHAOS_AUTH_MAX_FAILURES", "3")
+        monkeypatch.setenv("CHAOS_AUTH_LOCKOUT_SECONDS", "300")
+
+    def bad(self, client, n):
+        return [
+            client.get("/status", headers={"Authorization": "Bearer wrong"})
+            for _ in range(n)
+        ]
+
+    def test_failures_below_the_limit_are_plain_401s(self, client):
+        assert [r.status_code for r in self.bad(client, 3)] == [401, 401, 401]
+
+    def test_the_next_request_is_locked_out(self, client):
+        self.bad(client, 3)
+        response = client.get("/status", headers={"Authorization": "Bearer wrong"})
+        assert response.status_code == 429
+        assert 1 <= int(response.headers["Retry-After"]) <= 300
+
+    def test_a_correct_token_is_refused_during_the_lockout(self, client):
+        """Otherwise a correct guess could be confirmed."""
+        self.bad(client, 3)
+        response = client.get("/status", headers={"Authorization": f"Bearer {TOKEN}"})
+        assert response.status_code == 429
+
+    def test_missing_tokens_count_too(self, client):
+        for _ in range(3):
+            assert client.get("/status").status_code == 401
+        assert client.get("/status").status_code == 429
+
+    def test_a_good_login_resets_the_count(self, client):
+        self.bad(client, 2)
+        ok = client.get("/status", headers={"Authorization": f"Bearer {TOKEN}"})
+        assert ok.status_code == 200
+        assert [r.status_code for r in self.bad(client, 2)] == [401, 401]
+
+    def test_public_endpoints_stay_available_during_a_lockout(self, client):
+        """Kubernetes probes must not be locked out."""
+        self.bad(client, 3)
+        assert client.get("/health").status_code == 200
+
+    def test_it_can_be_turned_off(self, client, monkeypatch):
+        monkeypatch.setenv("CHAOS_AUTH_MAX_FAILURES", "0")
+        assert {r.status_code for r in self.bad(client, 20)} == {401}
+
+    def test_lockout_ends(self, client, monkeypatch):
+        from src import ratelimit
+
+        now = [1000.0]
+        monkeypatch.setattr(ratelimit.time, "monotonic", lambda: now[0])
+        self.bad(client, 3)
+        assert self.bad(client, 1)[0].status_code == 429
+        now[0] += 301
+        ok = client.get("/status", headers={"Authorization": f"Bearer {TOKEN}"})
+        assert ok.status_code == 200
+
+    def test_failures_and_lockouts_are_counted_in_metrics(self, client):
+        from src.metrics import AUTH_FAILURES_TOTAL, AUTH_LOCKOUTS_TOTAL, metric_value
+
+        before_invalid = metric_value(
+            AUTH_FAILURES_TOTAL, surface="api", reason="invalid"
+        )
+        before_locked = metric_value(
+            AUTH_FAILURES_TOTAL, surface="api", reason="locked_out"
+        )
+        before_lockouts = metric_value(AUTH_LOCKOUTS_TOTAL, surface="api")
+        self.bad(client, 4)  # 3 invalid, then 1 refused
+        assert (
+            metric_value(AUTH_FAILURES_TOTAL, surface="api", reason="invalid")
+            == before_invalid + 3
+        )
+        assert (
+            metric_value(AUTH_FAILURES_TOTAL, surface="api", reason="locked_out")
+            == before_locked + 1
+        )
+        assert metric_value(AUTH_LOCKOUTS_TOTAL, surface="api") == before_lockouts + 1
+
+    def test_invalid_throttle_settings_stop_startup(self, monkeypatch):
+        monkeypatch.setenv("CHAOS_AUTH_MAX_FAILURES", "lots")
+        with pytest.raises(SystemExit, match="CHAOS_AUTH_MAX_FAILURES"):
+            auth.validate_startup("127.0.0.1", insecure_no_auth=False)
+
+    def test_invalid_throttle_settings_fail_closed_at_request_time(
+        self, client, monkeypatch
+    ):
+        monkeypatch.setenv("CHAOS_AUTH_MAX_FAILURES", "lots")
+        response = client.get("/status", headers={"Authorization": f"Bearer {TOKEN}"})
+        assert response.status_code == 503

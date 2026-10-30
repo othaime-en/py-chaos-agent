@@ -43,6 +43,20 @@ KILL_SWITCH_HEALTH_CHECKS = Counter(
     ["result"],  # healthy or unhealthy
 )
 
+AUTH_FAILURES_TOTAL = Counter(
+    "chaos_auth_failures_total",
+    "Rejected authentication attempts",
+    # surface: api or metrics. reason: missing (no credential sent), invalid
+    # (wrong credential) or locked_out (refused during a lockout).
+    ["surface", "reason"],
+)
+
+AUTH_LOCKOUTS_TOTAL = Counter(
+    "chaos_auth_lockouts_total",
+    "Clients locked out after repeated failed authentication",
+    ["surface"],
+)
+
 INJECTION_ACTIVE = Gauge(
     "chaos_injection_active", "Currently active chaos injection", ["failure_type"]
 )

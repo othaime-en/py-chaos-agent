@@ -8,6 +8,7 @@ Design:
   disabled), protected routes return 503 instead of letting requests through.
 - The token is read on every request, so rotating a mounted Kubernetes
   Secret takes effect without restarting the agent.
+- Repeated failures lock the client out for a while (see src.ratelimit).
 
 Token sources, in priority order:
     1. CHAOS_API_TOKEN_FILE  (path to a file containing the token)
@@ -20,11 +21,13 @@ Explicit opt-out (loopback-only; enforced by src.api_server at startup):
 import hmac
 import os
 from pathlib import Path
-from typing import Optional
+from typing import NoReturn, Optional
 
 from fastapi import HTTPException, Request, status
 
+from . import ratelimit
 from .logging_config import get_logger
+from .metrics import AUTH_FAILURES_TOTAL, AUTH_LOCKOUTS_TOTAL
 
 logger = get_logger(__name__)
 
@@ -87,6 +90,56 @@ def _client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
+_throttle: Optional[ratelimit.FailureThrottle] = None
+
+
+def get_throttle() -> ratelimit.FailureThrottle:
+    """
+    The API's failed-login throttle, built from the environment.
+
+    Rebuilt if the settings change, so a test (or an operator restarting with new
+    values) never keeps an old limit. Raises ValueError for invalid settings.
+    """
+    global _throttle
+    settings = ratelimit.settings_from_env()
+    if _throttle is None or _throttle.settings != settings:
+        _throttle = ratelimit.FailureThrottle(settings)
+    return _throttle
+
+
+def reset_throttle() -> None:
+    """Forget all failure counts and lockouts."""
+    if _throttle is not None:
+        _throttle.reset()
+
+
+def _reject(
+    request: Request, throttle: ratelimit.FailureThrottle, reason: str
+) -> NoReturn:
+    """Count a failed attempt, maybe start a lockout, and raise the 401."""
+    client = _client_ip(request)
+    AUTH_FAILURES_TOTAL.labels(surface="api", reason=reason).inc()
+    if throttle.record_failure(client):
+        AUTH_LOCKOUTS_TOTAL.labels(surface="api").inc()
+        logger.warning(
+            "Client locked out after repeated failed authentication",
+            extra={
+                "client": client,
+                "lockout_seconds": throttle.settings.lockout_seconds,
+            },
+        )
+    detail = "Missing bearer token" if reason == "missing" else "Invalid bearer token"
+    logger.warning(
+        f"Request rejected: {detail.lower()}",
+        extra={"path": request.url.path, "client": client},
+    )
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail=detail,
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
 async def require_auth(request: Request) -> None:
     """
     FastAPI dependency applied app-wide. Allows PUBLIC_PATHS through and
@@ -118,31 +171,40 @@ async def require_auth(request: Request) -> None:
             detail="API authentication is not configured",
         )
 
+    try:
+        throttle = get_throttle()
+    except ValueError as e:
+        logger.error(
+            "Invalid authentication throttle settings", extra={"error": str(e)}
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="API authentication is misconfigured",
+        )
+
+    # A locked-out client is refused before its credential is even looked at, so
+    # a correct guess cannot be confirmed.
+    client = _client_ip(request)
+    wait = throttle.retry_after(client)
+    if wait is not None:
+        AUTH_FAILURES_TOTAL.labels(surface="api", reason="locked_out").inc()
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many failed authentication attempts. Try again later.",
+            headers={"Retry-After": str(wait)},
+        )
+
     header = request.headers.get("authorization", "")
     scheme, _, supplied = header.partition(" ")
 
     if scheme.lower() != "bearer" or not supplied:
-        logger.warning(
-            "Request rejected: missing bearer token",
-            extra={"path": request.url.path, "client": _client_ip(request)},
-        )
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing bearer token",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+        _reject(request, throttle, "missing")
 
     # Constant-time comparison; encode so non-ASCII input can't raise TypeError.
     if not hmac.compare_digest(supplied.strip().encode(), expected.encode()):
-        logger.warning(
-            "Request rejected: invalid bearer token",
-            extra={"path": request.url.path, "client": _client_ip(request)},
-        )
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid bearer token",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+        _reject(request, throttle, "invalid")
+
+    throttle.record_success(client)
 
 
 def validate_startup(host: str, insecure_no_auth: bool) -> None:
@@ -170,6 +232,11 @@ def validate_startup(host: str, insecure_no_auth: bool) -> None:
             "Do not use this outside local development."
         )
         return
+
+    try:
+        ratelimit.settings_from_env()
+    except ValueError as e:
+        raise SystemExit(f"Refusing to start: {e}")
 
     try:
         token = get_expected_token()
