@@ -14,6 +14,29 @@ latency. It is locked down by default.
 | No auth on public binds | `--insecure-no-auth` is rejected unless the host is loopback. |
 | Docs off | `/docs`, `/redoc` and `/openapi.json` return 404 unless `CHAOS_API_ENABLE_DOCS=true`. |
 | Least privilege | Containers drop all capabilities except `NET_ADMIN` and `KILL`. No `privileged`. |
+| Non-root | The images run as unprivileged users (UID 10001 for the agent, 10002 for the target app). |
+| Read-only filesystem | The root filesystem is read-only in Compose and Kubernetes. Only `/tmp` and the log directory are writable. |
+| Network policy | Kubernetes denies all traffic by default and allows only the target port, metrics from a `monitoring` namespace, and DNS. |
+
+## How the agent gets its capabilities
+
+The agent does not run as root. A non-root process gets no capabilities from a
+container runtime, even with `--cap-add`, so the image grants them as file
+capabilities instead:
+
+- the interpreter (`/opt/venv/bin/python`) carries `NET_ADMIN` and `KILL`
+- `tc` carries `NET_ADMIN`
+- every other process in the container has none
+
+The container must also be granted both capabilities (`cap_add` in Compose,
+`securityContext.capabilities.add` in Kubernetes). That grant is the upper bound.
+If it is missing the container fails to start with `operation not permitted`.
+
+Run the interpreter directly. A shell wrapper in front of it loses the
+capabilities when `no-new-privileges` is on.
+
+The Kubernetes pod needs `NET_ADMIN`, so it cannot satisfy the `restricted` Pod
+Security Standard. It fits `baseline` only if your cluster allows that capability.
 
 ## Configuring the token
 

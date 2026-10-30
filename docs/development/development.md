@@ -4,7 +4,7 @@
 
 ### Prerequisites
 
-- Python 3.10 or higher
+- Python 3.12 or higher
 - Docker and Docker Compose
 - Git
 - Virtual environment tool (venv, virtualenv, or conda)
@@ -25,7 +25,7 @@ source venv/bin/activate  # On Linux/Mac
 venv\Scripts\activate     # On Windows
 
 # Install dependencies
-pip install -r requirements.txt -r requirements-dev.txt
+pip install --require-hashes -r requirements-dev.txt
 
 # Verify installation
 python -c "import psutil, yaml, prometheus_client; print('Dependencies OK')"
@@ -67,8 +67,11 @@ py-chaos-agent/
 │   └── *.md                  # Documentation
 ├── config.yaml               # Default configuration
 ├── docker-compose.yml        # Local development setup
-├── requirements.txt          # Runtime dependencies
-├── requirements-dev.txt      # Development dependencies
+├── requirements.in           # Runtime dependencies (edit this)
+├── requirements.txt          # Runtime lockfile, hash-pinned (generated)
+├── requirements-dev.in       # Dev and CI dependencies (edit this)
+├── requirements-dev.txt      # Dev lockfile, hash-pinned (generated)
+├── Makefile                  # `make lock` regenerates the lockfiles
 └── README.md
 ```
 
@@ -612,3 +615,37 @@ Brief description of changes
 - **Discussions**: Use GitHub discussions for questions
 - **Documentation**: Check docs/ folder for detailed guides
 - **Examples**: See examples/ folder for use cases
+
+## Changing dependencies
+
+Dependencies are pinned with hashes, so a changed or tampered package fails to install.
+
+1. Edit `requirements.in` (runtime) or `requirements-dev.in` (tests, lint, CI tools).
+2. Run `make lock` on Python 3.12. It rewrites `requirements.txt` and `requirements-dev.txt`.
+3. Commit the `.in` and `.txt` files together.
+
+`make lock-upgrade` moves every transitive dependency to the newest allowed release.
+CI runs `pip-audit` against the runtime lockfile and fails on any known vulnerability.
+
+## Continuous integration
+
+`.github/workflows/ci.yml` runs six jobs:
+
+| Job | What it checks |
+| --- | --- |
+| `test` | `black`, `flake8`, `mypy`, then the tests. Fails under 90% coverage. |
+| `audit` | `pip-audit` on both lockfiles. Also runs every Monday, because new advisories appear without a commit. |
+| `docker` | Builds both images and scans them with Trivy. Fixable HIGH or CRITICAL findings fail the build. |
+| `kubernetes` | Builds the images, starts a kind cluster, deploys `k8s/chaos-demo.yaml` and runs `scripts/k8s_smoke_test.sh`. |
+| `terraform` | `terraform fmt -check` and `terraform validate` (no cloud credentials needed). |
+| `coverage-badge` | On `main` only: publishes the README coverage badge to the `badges` branch. |
+
+Every third-party action is pinned to a full commit SHA, with the version in a comment.
+A tag can be moved to malicious code, and `aquasecurity/trivy-action` was attacked this way in
+March 2026. Dependabot proposes updates for actions, Python packages, base images and Terraform.
+
+Run the smoke test yourself against any cluster that has the images loaded:
+
+```bash
+scripts/k8s_smoke_test.sh
+```

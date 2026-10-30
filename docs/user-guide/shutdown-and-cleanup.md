@@ -95,7 +95,7 @@ With Docker (needs the `netem` kernel module on the host):
 export CHAOS_API_TOKEN=$(openssl rand -hex 32)
 docker run -d --name chaos --cap-add NET_ADMIN --cap-add KILL \
   -p 127.0.0.1:9000:9000 -e CHAOS_API_TOKEN -e CHAOS_API_HOST=0.0.0.0 \
-  -v $PWD/config.yaml:/app/config.yaml:ro py-chaos-agent:latest
+  -v $PWD/config.yaml:/app/config.yaml:ro py-chaos-agent:1.0.0
 
 # start a 5 minute network injection, then confirm the rule exists
 curl -H "Authorization: Bearer $CHAOS_API_TOKEN" -H 'Content-Type: application/json' \

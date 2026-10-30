@@ -60,6 +60,7 @@ nav:
       - Architecture: user-guide/architecture.md
       - Monitoring: user-guide/monitoring.md
       - Kubernetes Deployment: user-guide/kubernetes.md
+      - Terraform (AWS EKS): user-guide/terraform.md
       - API Security: user-guide/api-security.md
       - Blast Radius: user-guide/blast-radius.md
       - Process Targeting: user-guide/process-targeting.md

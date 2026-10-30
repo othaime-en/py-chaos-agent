@@ -6,7 +6,7 @@ This guide covers the different ways to install and run Py-Chaos-Agent.
 
 Before installing Py-Chaos-Agent, ensure you have:
 
-- Python 3.10 or higher
+- Python 3.12 or higher
 - Docker (for containerized deployment)
 - kubectl (for Kubernetes deployment)
 - Access to a test environment
@@ -33,10 +33,10 @@ git clone https://github.com/othaime-en/py-chaos-agent.git
 cd py-chaos-agent
 
 # Build the chaos agent image
-docker build -t py-chaos-agent:latest -f docker/Dockerfile .
+docker build -t py-chaos-agent:1.0.0 -f docker/Dockerfile .
 
 # Build the target app image
-docker build -t target-app:latest -f docker/Dockerfile.target .
+docker build -t target-app:1.0.0 -f docker/Dockerfile.target .
 ```
 
 ## Local Development Installation
@@ -52,11 +52,11 @@ cd py-chaos-agent
 python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 
-# Install dependencies
-pip install -r requirements.txt
+# Install dependencies (hash-verified)
+pip install --require-hashes -r requirements.txt
 
-# Install development dependencies (optional)
-pip install -r requirements-dev.txt
+# Or install everything for development (includes the runtime set)
+pip install --require-hashes -r requirements-dev.txt
 ```
 
 ## Kubernetes Installation
@@ -68,12 +68,12 @@ For Kubernetes deployment, you'll need:
 
 ```bash
 # Load images (for local testing with kind/minikube)
-kind load docker-image py-chaos-agent:latest
-kind load docker-image target-app:latest
+kind load docker-image py-chaos-agent:1.0.0
+kind load docker-image target-app:1.0.0
 
 # Or for minikube
-minikube image load py-chaos-agent:latest
-minikube image load target-app:latest
+minikube image load py-chaos-agent:1.0.0
+minikube image load target-app:1.0.0
 ```
 
 See the [Kubernetes Deployment](../user-guide/kubernetes.md) guide for detailed deployment instructions.
@@ -101,7 +101,7 @@ source venv/bin/activate
 pytest
 
 # Check Python version
-python --version  # Should be 3.10+
+python --version  # Should be 3.12+
 ```
 
 ## Next Steps
@@ -129,14 +129,14 @@ docker-compose --version
 
 ### Python Version Issues
 
-Ensure you're using Python 3.10+:
+Ensure you're using Python 3.12+:
 
 ```bash
 # Check Python version
 python --version
 
-# If needed, specify python3.10
-python3.10 -m venv venv
+# If needed, specify python3.12
+python3.12 -m venv venv
 ```
 
 ### Permission Issues

@@ -1,0 +1,9 @@
+# Runtime dependencies (direct only). Edit this file, then run `make lock`.
+# The fully pinned, hash-verified set is requirements.txt.
+psutil==7.2.2
+pyyaml==6.0.3
+prometheus_client==0.26.0
+fastapi==0.162.0
+uvicorn[standard]==0.54.0
+pydantic==2.14.1
+requests==2.34.2

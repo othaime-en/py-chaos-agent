@@ -17,6 +17,12 @@ services:
     init: true
     cpus: 1.0
     mem_limit: 256m
+    # The image runs as an unprivileged user (UID 10002). It needs nothing else.
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
 
   chaos-agent:
     build:
@@ -28,8 +34,15 @@ services:
     # tears down the shared PID namespace and kills everything in it, including
     # this agent. Restart it along with the target.
     restart: always
-    # Least privilege: no `privileged: true`. NET_ADMIN is needed for `tc`
-    # latency injection, KILL for signalling the target process.
+    # Least privilege: no `privileged: true`, and the image runs as an
+    # unprivileged user (UID 10001). NET_ADMIN is needed for `tc` latency
+    # injection, KILL for signalling the target process (a different user).
+    # The image hands exactly those two to its interpreter as file capabilities;
+    # the cap_add below is what allows it. Remove either and the container
+    # refuses to start ("operation not permitted").
+    read_only: true
+    tmpfs:
+      - /tmp
     # Resource limits are the blast-radius boundary for CPU and memory
     # injections. The agent sizes injections to a fraction of these
     # (config.yaml: safety). pids_limit stops a runaway fork.

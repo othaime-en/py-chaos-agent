@@ -4,32 +4,199 @@ on:
   push:
     branches: [main]
   pull_request:
+  # New advisories appear without any commit, so audit the dependencies weekly.
+  schedule:
+    - cron: "17 5 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Third-party actions are pinned to full commit SHAs, not tags: a tag can be
+# moved to malicious code (aquasecurity/trivy-action was hit exactly that way in
+# March 2026). Dependabot proposes the updates. The comment names the version.
+env:
+  AGENT_IMAGE: py-chaos-agent:1.0.0
+  TARGET_IMAGE: target-app:1.0.0
 
 jobs:
   test:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
-          python-version: "3.10"
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
 
       - name: Install dependencies
         run: |
           python -m venv venv
           source venv/bin/activate
-          pip install -r requirements.txt -r requirements-dev.txt
+          pip install --require-hashes -r requirements-dev.txt
 
       - name: Lint
         run: |
           source venv/bin/activate
-          black --check src tests
-          flake8 src tests
-          mypy src --install-types --non-interactive
+          black --check src tests scripts
+          flake8 src tests scripts
+          mypy src
 
       - name: Test with coverage
         run: |
           source venv/bin/activate
-          pytest --cov=src --cov-report=xml
+          pytest --cov=src --cov-report=xml --cov-fail-under=90
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          retention-days: 7
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Install pip-audit
+        run: |
+          python -m venv venv
+          source venv/bin/activate
+          pip install --require-hashes -r requirements-dev.txt
+
+      # The runtime lockfile is what ships in the image. Fail on any known
+      # vulnerability. --disable-pip audits the pinned versions exactly as locked.
+      - name: Audit runtime dependencies
+        run: |
+          source venv/bin/activate
+          pip-audit -r requirements.txt --disable-pip --strict
+
+      - name: Audit development dependencies
+        run: |
+          source venv/bin/activate
+          pip-audit -r requirements-dev.txt --disable-pip --strict
+
+  docker:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: agent
+            dockerfile: docker/Dockerfile
+            image: py-chaos-agent:1.0.0
+          - name: target
+            dockerfile: docker/Dockerfile.target
+            image: target-app:1.0.0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build ${{ matrix.name }} image
+        run: docker build -f ${{ matrix.dockerfile }} -t ${{ matrix.image }} .
+
+      # Fixable HIGH and CRITICAL findings fail the build. Findings with no fix
+      # yet are ignored, because nothing can be done about them here.
+      - name: Scan ${{ matrix.name }} image
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+        with:
+          image-ref: ${{ matrix.image }}
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+
+  kubernetes:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build images
+        run: |
+          docker build -f docker/Dockerfile -t "$AGENT_IMAGE" .
+          docker build -f docker/Dockerfile.target -t "$TARGET_IMAGE" .
+
+      - name: Create kind cluster
+        uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
+        with:
+          cluster_name: chaos
+
+      - name: Load images into the cluster
+        run: |
+          kind load docker-image "$AGENT_IMAGE" --name chaos
+          kind load docker-image "$TARGET_IMAGE" --name chaos
+
+      - name: Smoke test the demo
+        run: scripts/k8s_smoke_test.sh
+
+  terraform:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: terraform
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: "1.10.5"
+
+      - name: Format
+        run: terraform fmt -check -recursive
+
+      # No backend and no credentials needed to validate the configuration.
+      - name: Validate
+        run: |
+          terraform init -backend=false -input=false
+          terraform validate
+
+  coverage-badge:
+    # Publishes the badge the README shows. Only on main, never on pull requests.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: coverage-xml
+
+      - name: Generate badge
+        run: python3 scripts/coverage_badge.py coverage.xml coverage.svg
+
+      - name: Publish to the badges branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          mkdir -p /tmp/badges && cp coverage.svg /tmp/badges/
+          if git ls-remote --exit-code --heads origin badges >/dev/null 2>&1; then
+            git fetch --depth=1 origin badges
+            git checkout -f -B badges FETCH_HEAD
+          else
+            git checkout --orphan badges
+            git rm -rf --quiet .
+          fi
+          cp /tmp/badges/coverage.svg .
+          git add coverage.svg
+          if git diff --cached --quiet; then
+            echo "Badge unchanged"
+          else
+            git commit -m "Update coverage badge"
+            git push origin badges
+          fi
