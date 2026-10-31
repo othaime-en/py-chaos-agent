@@ -10,7 +10,9 @@
 #   * both containers start with the hardened securityContext
 #   * the agent runs as UID 10001 and holds exactly NET_ADMIN + KILL
 #   * the target runs as UID 10002 and holds nothing
-#   * the API enforces its token
+#   * the API enforces its token and its roles
+#   * the metrics endpoint demands its own token, and the API token is not it
+#   * the audit log names who ran each injection
 #   * a network injection really installs (and removes) a netem qdisc
 #   * a process injection really kills the target (CAP_KILL across users)
 set -euo pipefail
@@ -19,9 +21,11 @@ NS=chaos-demo
 APP=deploy/resilient-app
 MANIFEST="${MANIFEST:-k8s/chaos-demo.yaml}"
 PORT="${PORT:-19000}"
+METRICS_PORT="${METRICS_PORT:-18000}"
 CAP_NET_ADMIN_AND_KILL="0000000000001020" # bit 12 + bit 5
 
 pf_pid=""
+metrics_pf_pid=""
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok() { echo "ok:   $*"; }
 
@@ -35,6 +39,7 @@ dump() {
 cleanup() {
   status=$?
   [ -n "$pf_pid" ] && kill "$pf_pid" 2>/dev/null || true
+  [ -n "$metrics_pf_pid" ] && kill "$metrics_pf_pid" 2>/dev/null || true
   [ "$status" -ne 0 ] && dump
   exit "$status"
 }
@@ -66,7 +71,9 @@ manifest=$(sed 's/auto_start: true/auto_start: false/' "$MANIFEST")
 grep -q 'auto_start: false' <<<"$manifest" || fail "auto_start not found in $MANIFEST"
 kubectl apply -f - <<<"$manifest"
 TOKEN=$(openssl rand -hex 32)
-kubectl -n "$NS" create secret generic chaos-api-token --from-literal=token="$TOKEN" \
+METRICS_TOKEN=$(openssl rand -hex 32)
+kubectl -n "$NS" create secret generic chaos-api-token \
+  --from-literal=token="$TOKEN" --from-literal=metrics-token="$METRICS_TOKEN" \
   --dry-run=client -o yaml | kubectl apply -f -
 kubectl -n "$NS" rollout status "$APP" --timeout=240s
 ok "deployment is ready (both containers started under the hardened securityContext)"
@@ -115,6 +122,21 @@ wait_until 60 "kill switch closed" status_is_closed
 no_netem() { ! kubectl -n "$NS" exec "$APP" -c chaos-agent -- tc qdisc show dev eth0 | grep -q netem; }
 no_netem || fail "a netem qdisc is already present before the test injected one"
 
+# ------------------------------------------------------------- metrics
+kubectl -n "$NS" port-forward "$APP" "${METRICS_PORT}:8000" >/tmp/smoke-metrics-pf.log 2>&1 &
+metrics_pf_pid=$!
+metrics_code() { # metrics_code [token] -> HTTP status
+  curl -sS -o /tmp/smoke-metrics-body -w '%{http_code}' \
+    ${1:+-H "Authorization: Bearer $1"} "http://127.0.0.1:${METRICS_PORT}/metrics"
+}
+wait_until 30 "metrics port-forward" bash -c \
+  "curl -s -o /dev/null http://127.0.0.1:${METRICS_PORT}/metrics"
+[ "$(metrics_code)" = "401" ] || fail "metrics served without a token"
+[ "$(metrics_code "$TOKEN")" = "401" ] || fail "the API token was accepted for metrics"
+[ "$(metrics_code "$METRICS_TOKEN")" = "200" ] || fail "metrics token rejected"
+grep -q '^chaos_' /tmp/smoke-metrics-body || fail "metrics body has no chaos_ series"
+ok "metrics need their own token, and the API token does not open them"
+
 # -------------------------------------------------------------- network
 [ "$(api POST /inject/manual '{"failure_type":"network"}')" = "200" ] \
   || fail "network injection refused: $(cat /tmp/smoke-body)"
@@ -137,5 +159,17 @@ wait_until 60 "target-app restart" bash -c "
     -o jsonpath='{.items[0].status.containerStatuses[?(@.name==\"target-app\")].restartCount}')
   [ \"\$now\" -gt \"$before\" ]"
 ok "process injection killed the target across users (KILL works for a non-root user)"
+
+# ---------------------------------------------------------------- audit
+[ "$(api GET /audit)" = "200" ] || fail "could not read the audit log"
+audited() { jq -e --arg path "$1" \
+  '[.events[] | select(.event == "api.request" and .path == $path and .principal == "shared-token")] | length > 0' \
+  /tmp/smoke-body >/dev/null; }
+audited /inject/manual || fail "manual injections are missing from the audit log"
+jq -e '[.events[] | select(.event == "injection.started" and .source == "manual")] | length >= 2' \
+  /tmp/smoke-body >/dev/null || fail "injection.started events missing"
+grep -q "$TOKEN" /tmp/smoke-body && fail "the API token appears in the audit log"
+grep -q "$METRICS_TOKEN" /tmp/smoke-body && fail "the metrics token appears in the audit log"
+ok "the audit log names who ran each injection and contains no tokens"
 
 echo "All checks passed."

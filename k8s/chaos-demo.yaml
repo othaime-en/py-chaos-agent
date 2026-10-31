@@ -170,6 +170,17 @@ spec:
               value: "0.0.0.0"
             - name: CHAOS_API_TOKEN_FILE
               value: /var/run/secrets/chaos-api/token
+            # Metrics listen on loopback unless told otherwise. Prometheus
+            # reaches them on the pod IP, which requires a scrape token (a
+            # different value from the API token, in the same Secret).
+            - name: CHAOS_METRICS_HOST
+              value: "0.0.0.0"
+            - name: CHAOS_METRICS_TOKEN_FILE
+              value: /var/run/secrets/chaos-api/metrics-token
+            # Who did what, one JSON object per line, on the logs volume. The same
+            # events are on stdout and at GET /audit (admin).
+            - name: CHAOS_AUDIT_LOG_FILE
+              value: /var/log/chaos-agent/audit.log
             - name: HOSTNAME
               valueFrom:
                 fieldRef:
@@ -197,9 +208,14 @@ spec:
           emptyDir:
             medium: Memory
             sizeLimit: 16Mi
-        # Create before applying (pod will not start without it):
+        # Create before applying (pod will not start without it). Two different
+        # values: the API token, and the token Prometheus uses to scrape metrics.
         #   kubectl -n chaos-demo create secret generic chaos-api-token \
-        #     --from-literal=token="$(openssl rand -hex 32)"
+        #     --from-literal=token="$(openssl rand -hex 32)" \
+        #     --from-literal=metrics-token="$(openssl rand -hex 32)"
+        # An existing Secret needs the new key:
+        #   kubectl -n chaos-demo patch secret chaos-api-token --type merge \
+        #     -p "{\"stringData\":{\"metrics-token\":\"$(openssl rand -hex 32)\"}}"
         - name: api-token
           secret:
             secretName: chaos-api-token
