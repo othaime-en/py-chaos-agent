@@ -94,3 +94,48 @@ def env(tmp_path):
     e = Env(tmp_path)
     yield e
     e.cleanup()
+
+
+@pytest.fixture(scope="session")
+def tls_certs(tmp_path_factory):
+    """
+    Throwaway certificates for TLS tests: a CA, a server certificate for
+    127.0.0.1 and localhost signed by it, a client certificate signed by it, and
+    an unrelated certificate and key (to test mismatches). Needs the openssl CLI.
+    """
+    import shutil
+    import subprocess
+    from types import SimpleNamespace
+
+    if shutil.which("openssl") is None:
+        pytest.skip("openssl is not installed")
+    d = tmp_path_factory.mktemp("certs")
+
+    def run(*args):
+        subprocess.run(["openssl", *args], cwd=d, check=True, capture_output=True)
+
+    def issue(name, cn, ext):
+        run("req", "-newkey", "rsa:2048", "-nodes", "-keyout", f"{name}.key",
+            "-subj", f"/CN={cn}", "-out", f"{name}.csr")  # fmt: skip
+        (d / f"{name}.ext").write_text(ext + "\n")
+        run("x509", "-req", "-in", f"{name}.csr", "-CA", "ca.crt", "-CAkey", "ca.key",
+            "-CAcreateserial", "-out", f"{name}.crt", "-days", "2",
+            "-extfile", f"{name}.ext")  # fmt: skip
+
+    run("req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", "ca.key",
+        "-subj", "/CN=test-ca", "-days", "2", "-out", "ca.crt")  # fmt: skip
+    issue("server", "localhost", "subjectAltName=IP:127.0.0.1,DNS:localhost")
+    issue("client", "test-client", "extendedKeyUsage=clientAuth")
+    # Unrelated self-signed pair, for "key does not match certificate".
+    run("req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", "other.key",
+        "-subj", "/CN=other", "-days", "2", "-out", "other.crt")  # fmt: skip
+    return SimpleNamespace(
+        dir=d,
+        ca=str(d / "ca.crt"),
+        cert=str(d / "server.crt"),
+        key=str(d / "server.key"),
+        client_cert=str(d / "client.crt"),
+        client_key=str(d / "client.key"),
+        other_cert=str(d / "other.crt"),
+        other_key=str(d / "other.key"),
+    )
