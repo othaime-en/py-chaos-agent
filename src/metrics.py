@@ -58,6 +58,11 @@ AUTH_LOCKOUTS_TOTAL = Counter(
     ["surface"],
 )
 
+AUDIT_WRITE_FAILURES_TOTAL = Counter(
+    "chaos_audit_write_failures_total",
+    "Audit events that could not be written to the audit log file",
+)
+
 INJECTION_ACTIVE = Gauge(
     "chaos_injection_active", "Currently active chaos injection", ["failure_type"]
 )

@@ -71,12 +71,13 @@ ROLE_POLICY: Dict[Tuple[str, str], str] = {
     ("POST", "/agent/restart"): OPERATOR,
     ("POST", "/inject/manual"): OPERATOR,
     ("POST", "/inject/abort"): OPERATOR,
-    # Change the rules: configuration and safety overrides
+    # Change the rules: configuration, safety overrides, the audit trail
     ("PATCH", "/config"): ADMIN,
     ("PATCH", "/config/failures/{failure_type}"): ADMIN,
     ("POST", "/config/reload"): ADMIN,
     ("POST", "/kill-switch/reset"): ADMIN,
     ("POST", "/metrics/reset"): ADMIN,
+    ("GET", "/audit"): ADMIN,
 }
 
 _TRUTHY = {"1", "true", "yes", "on"}
@@ -179,6 +180,7 @@ def _reject(
     client = _client_ip(request)
     AUTH_FAILURES_TOTAL.labels(surface="api", reason=reason).inc()
     request.state.auth_failure = reason
+    request.state.auth_failure_owner = owner
     if throttle.record_failure(client):
         AUTH_LOCKOUTS_TOTAL.labels(surface="api").inc()
         logger.warning(
@@ -303,6 +305,8 @@ async def require_auth(request: Request) -> None:
                     "client": client,
                 },
             )
+            request.state.auth_forbidden = True
+            request.state.audit_detail = {"required_role": needed}
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"This action needs the '{needed}' role",
