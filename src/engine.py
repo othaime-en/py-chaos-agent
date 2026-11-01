@@ -135,6 +135,14 @@ class ChaosEngine:
         error_backoff_seconds: How long to wait after a tick fails outright
             (for example because the config is unavailable).
         name: Used for the thread names.
+        max_injections: Stop scheduling after this many injections have been
+            started (dry runs count). ``None`` means no cap. Once the cap is
+            reached the loop ends by itself and :attr:`exhausted` is True;
+            injections already running are left to finish.
+        audit_context: Extra fields for the audit events of every injection
+            this engine starts. They override the defaults, so an experiment
+            can record who started it and under which run instead of
+            ``scheduler``.
     """
 
     def __init__(
@@ -145,6 +153,8 @@ class ChaosEngine:
         injector: Optional[Callable[[str, Mapping[str, Any], bool], None]] = None,
         error_backoff_seconds: float = 10.0,
         name: str = "chaos-engine",
+        max_injections: Optional[int] = None,
+        audit_context: Optional[Mapping[str, Any]] = None,
     ) -> None:
         self._settings_provider = settings_provider
         self._kill_switch_provider = kill_switch_provider or (lambda: None)
@@ -152,6 +162,8 @@ class ChaosEngine:
         self._injector = injector or run_injection
         self._error_backoff = error_backoff_seconds
         self._name = name
+        self._max_injections = max_injections
+        self._audit_context: Dict[str, Any] = dict(audit_context or {})
 
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -160,6 +172,8 @@ class ChaosEngine:
         self._start_time: Optional[float] = None
         self._iteration = 0
         self._paused = False
+        self._injections_started = 0
+        self._exhausted = False
 
     # -- state ---------------------------------------------------------------
 
@@ -186,6 +200,16 @@ class ChaosEngine:
         """True while the engine is holding chaos back for the kill switch."""
         return self._paused
 
+    @property
+    def injections_started(self) -> int:
+        """How many injections this engine has started since :meth:`start`."""
+        return self._injections_started
+
+    @property
+    def exhausted(self) -> bool:
+        """True once ``max_injections`` has been reached."""
+        return self._exhausted
+
     def in_flight(self) -> int:
         """How many worker threads are still running an injection."""
         with self._lock:
@@ -203,19 +227,32 @@ class ChaosEngine:
             self._start_time = time.time()
             self._iteration = 0
             self._paused = False
+            self._injections_started = 0
+            self._exhausted = False
             thread = threading.Thread(target=self._run, daemon=True, name=self._name)
             self._thread = thread
         thread.start()
 
-    def stop(self, timeout: float = 5.0, reason: str = "agent stopped") -> bool:
+    def stop(
+        self,
+        timeout: float = 5.0,
+        reason: str = "agent stopped",
+        abort_running: bool = True,
+    ) -> bool:
         """
-        Stop the loop, abort running injections, and wait for them to finish.
+        Stop the loop and wait for the injections to finish.
+
+        By default running injections are aborted so their effects are removed
+        right away. With ``abort_running=False`` they are left to run to the end
+        of their own duration (the way an experiment ends normally); ``timeout``
+        then has to cover that.
 
         Returns True if everything has stopped within ``timeout`` seconds. Safe
         to call when not running and from any thread except the loop's own.
         """
         self._stop.set()
-        lifecycle.abort_active(reason)
+        if abort_running:
+            lifecycle.abort_active(reason)
 
         deadline = time.monotonic() + max(timeout, 0)
         thread = self._thread
@@ -266,6 +303,8 @@ class ChaosEngine:
                     self._iteration += 1
                     self.run_tick(settings, self._iteration)
                     wait_for = settings.interval_seconds
+                    if self._exhausted:
+                        break
                 except Exception as e:
                     logger.error(
                         "Unexpected error in chaos loop",
@@ -303,6 +342,8 @@ class ChaosEngine:
 
         for name, cfg in settings.failures.items():
             if self._should_exit():
+                break
+            if self._exhausted:
                 break
             if not cfg["enabled"]:
                 logger.debug(
@@ -360,6 +401,16 @@ class ChaosEngine:
             )
             self._spawn(name, cfg, settings.dry_run, ks, correlation_id)
             result.started += 1
+            self._injections_started += 1
+            if (
+                self._max_injections is not None
+                and self._injections_started >= self._max_injections
+            ):
+                logger.info(
+                    "Injection cap reached, no more will be started",
+                    extra={"max_injections": self._max_injections},
+                )
+                self._exhausted = True
 
         logger.debug(
             "Chaos iteration complete",
@@ -424,6 +475,7 @@ class ChaosEngine:
             "role": None,
             "source": "scheduler",
         }
+        who.update(self._audit_context)
         try:
             audit.record(
                 "injection.started",
