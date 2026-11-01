@@ -174,7 +174,11 @@ class TestListAndShow:
         assert client.post("/experiments/nope/run").status_code == 404
 
     def test_none_defined(self, client):
-        agent_state.config = load_config()
+        agent_state.config = Config(
+            validate_config_dict(
+                {"agent": {}, "failures": {"cpu": {"duration_seconds": 5}}}
+            )
+        )
         assert client.get("/experiments").json() == {"count": 0, "experiments": []}
 
     def test_runs_start_empty(self, client, configured):

@@ -368,5 +368,6 @@ class TestLoadConfig:
 
     def test_the_shipped_example_config_loads(self):
         config = load_config("config.yaml")
+        assert "cpu-recovery" in config.experiments
         for name, exp in config.experiments.items():
             assert exp["name"] == name

@@ -10,6 +10,7 @@ A Python-based chaos engineering sidecar tool for testing the resilience of cont
 ## Features
 
 - **Multiple Failure Modes**: CPU stress, memory pressure, process termination, network latency
+- **Experiments**: Named runs with a hypothesis, a steady-state check before and after, and a verdict. See [Experiments](docs/user-guide/experiments.md)
 - **Flexible Configuration**: YAML-based configuration with probability controls
 - **Kubernetes Native**: Designed as a sidecar container with proper security contexts
 - **Observable**: Prometheus metrics for monitoring chaos experiments
