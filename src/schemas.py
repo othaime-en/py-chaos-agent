@@ -281,6 +281,204 @@ class KillSwitchSettings(_StrictModel):
         return self
 
 
+# ---------------------------------------------------------------------------
+# Experiments
+# ---------------------------------------------------------------------------
+
+_EXPERIMENT_NAME_PATTERN = (
+    rf"^[a-z0-9][a-z0-9._-]{{0,{limits.MAX_EXPERIMENT_NAME_LENGTH - 1}}}$"
+)
+_CHECK_NAME_PATTERN = r"^[a-z0-9][a-z0-9._-]{0,63}$"
+
+
+class HttpCheckConfig(_StrictModel):
+    """
+    One steady-state check: an HTTP request that must succeed.
+
+    Healthy means the status matches ``expected_status`` (any 2xx when it is
+    not set) and, if ``max_latency_ms`` is set, the response arrived in time.
+    Redirects are not followed.
+    """
+
+    type: Literal["http"] = "http"
+    name: str = Field(pattern=_CHECK_NAME_PATTERN)
+    url: str
+    expected_status: Optional[int] = Field(default=None, ge=100, le=599)
+    max_latency_ms: Optional[int] = Field(
+        default=None, ge=limits.MIN_CHECK_LATENCY_MS, le=limits.MAX_CHECK_LATENCY_MS
+    )
+    timeout_seconds: int = Field(
+        default=2,
+        ge=limits.MIN_CHECK_TIMEOUT_SECONDS,
+        le=limits.MAX_CHECK_TIMEOUT_SECONDS,
+    )
+
+    @field_validator("url")
+    @classmethod
+    def _check_url(cls, value: str) -> str:
+        return check_http_url(value, "url")
+
+    @model_validator(mode="after")
+    def _latency_fits_timeout(self) -> "HttpCheckConfig":
+        if (
+            self.max_latency_ms is not None
+            and self.max_latency_ms > self.timeout_seconds * 1000
+        ):
+            raise ValueError(
+                "max_latency_ms must not exceed timeout_seconds * 1000, or the "
+                "limit could never be reached"
+            )
+        return self
+
+
+class SteadyStateConfig(_StrictModel):
+    """
+    What "the system is healthy" means for an experiment.
+
+    The state is checked before any chaos starts (the experiment is refused if
+    the target is not healthy to begin with) and again after it ends, for up to
+    ``recovery_timeout_seconds``. It counts as reached once every check passes
+    ``required_consecutive_successes`` rounds in a row.
+    """
+
+    checks: List[HttpCheckConfig] = Field(
+        min_length=1, max_length=limits.MAX_STEADY_STATE_CHECKS
+    )
+    check_interval_seconds: int = Field(
+        default=2,
+        ge=limits.MIN_STEADY_CHECK_INTERVAL_SECONDS,
+        le=limits.MAX_STEADY_CHECK_INTERVAL_SECONDS,
+    )
+    required_consecutive_successes: int = Field(
+        default=2,
+        ge=limits.MIN_REQUIRED_SUCCESSES,
+        le=limits.MAX_REQUIRED_SUCCESSES,
+    )
+    baseline_timeout_seconds: int = Field(
+        default=30,
+        ge=limits.MIN_BASELINE_TIMEOUT_SECONDS,
+        le=limits.MAX_BASELINE_TIMEOUT_SECONDS,
+    )
+    recovery_timeout_seconds: int = Field(
+        default=60,
+        ge=limits.MIN_RECOVERY_TIMEOUT_SECONDS,
+        le=limits.MAX_RECOVERY_TIMEOUT_SECONDS,
+    )
+
+    @field_validator("checks")
+    @classmethod
+    def _unique_check_names(cls, value: List[HttpCheckConfig]) -> List[HttpCheckConfig]:
+        seen = set()
+        for check in value:
+            if check.name in seen:
+                raise ValueError(f"duplicate check name '{check.name}'")
+            seen.add(check.name)
+        return value
+
+
+class ExperimentSchedule(_StrictModel):
+    """
+    How an experiment's chaos is paced.
+
+    The faults are rolled every ``interval_seconds`` (the first roll happens
+    right away) until ``duration_seconds`` have passed or ``max_injections``
+    injections have started, whichever comes first.
+    """
+
+    duration_seconds: int = Field(
+        ge=limits.MIN_EXPERIMENT_DURATION_SECONDS,
+        le=limits.MAX_EXPERIMENT_DURATION_SECONDS,
+    )
+    interval_seconds: int = Field(
+        default=10,
+        ge=limits.MIN_INTERVAL_SECONDS,
+        le=limits.MAX_INTERVAL_SECONDS,
+    )
+    max_injections: Optional[int] = Field(
+        default=None,
+        ge=limits.MIN_EXPERIMENT_INJECTIONS,
+        le=limits.MAX_EXPERIMENT_INJECTIONS,
+    )
+
+
+# Inside an experiment a listed fault is meant to run, so the defaults differ
+# from the global ``failures`` section (disabled, probability 0). Everything
+# else, including every hard limit, is inherited unchanged.
+
+
+class ExperimentCpuFault(CpuFailureConfig):
+    enabled: bool = True
+    probability: Probability = 1.0
+
+
+class ExperimentMemoryFault(MemoryFailureConfig):
+    enabled: bool = True
+    probability: Probability = 1.0
+
+
+class ExperimentProcessFault(ProcessFailureConfig):
+    enabled: bool = True
+    probability: Probability = 1.0
+
+
+class ExperimentNetworkFault(NetworkFailureConfig):
+    enabled: bool = True
+    probability: Probability = 1.0
+
+
+class ExperimentFaults(_StrictModel):
+    cpu: Optional[ExperimentCpuFault] = None
+    memory: Optional[ExperimentMemoryFault] = None
+    process: Optional[ExperimentProcessFault] = None
+    network: Optional[ExperimentNetworkFault] = None
+
+    @model_validator(mode="after")
+    def _something_can_fire(self) -> "ExperimentFaults":
+        faults = [getattr(self, name) for name in FAILURE_TYPES]
+        if not any(f is not None and f.enabled and f.probability > 0 for f in faults):
+            raise ValueError(
+                "an experiment needs at least one fault that is enabled with a "
+                "probability above 0"
+            )
+        return self
+
+
+class ExperimentConfig(_StrictModel):
+    """
+    A named, self-contained chaos experiment.
+
+    Hypothesis: a sentence saying what you expect, for example "the service
+    answers /health again within 30 seconds after its CPU was saturated". The
+    run verdict says whether the steady state held up that expectation.
+    """
+
+    name: str = Field(pattern=_EXPERIMENT_NAME_PATTERN)
+    description: str = Field(default="", max_length=limits.MAX_DESCRIPTION_LENGTH)
+    hypothesis: str = Field(min_length=1, max_length=limits.MAX_HYPOTHESIS_LENGTH)
+    steady_state: SteadyStateConfig
+    faults: ExperimentFaults
+    schedule: ExperimentSchedule
+    dry_run: bool = False
+
+    @field_validator("hypothesis")
+    @classmethod
+    def _hypothesis_not_blank(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("hypothesis must not be blank")
+        return value
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Plain dict with defaults filled in; only the faults actually used."""
+        data = self.model_dump(exclude={"faults"})
+        data["faults"] = {
+            name: getattr(self.faults, name).model_dump()
+            for name in FAILURE_TYPES
+            if getattr(self.faults, name) is not None
+        }
+        return data
+
+
 class AppConfig(_StrictModel):
     agent: AgentSettings
     failures: FailuresSection
@@ -288,6 +486,21 @@ class AppConfig(_StrictModel):
     # Validated elsewhere (logging_config). Passed through as-is.
     logging: Optional[Dict[str, Any]] = None
     kill_switch: KillSwitchSettings = Field(default_factory=KillSwitchSettings)
+    experiments: List[ExperimentConfig] = Field(
+        default_factory=list, max_length=limits.MAX_EXPERIMENTS
+    )
+
+    @field_validator("experiments")
+    @classmethod
+    def _unique_experiment_names(
+        cls, value: List[ExperimentConfig]
+    ) -> List[ExperimentConfig]:
+        seen = set()
+        for experiment in value:
+            if experiment.name in seen:
+                raise ValueError(f"duplicate experiment name '{experiment.name}'")
+            seen.add(experiment.name)
+        return value
 
 
 # ---------------------------------------------------------------------------
@@ -325,6 +538,8 @@ def validate_config_dict(raw: Any) -> Dict[str, Any]:
     }
     if model.logging is not None:
         normalized["logging"] = model.logging
+    if model.experiments:
+        normalized["experiments"] = [e.to_dict() for e in model.experiments]
     return normalized
 
 

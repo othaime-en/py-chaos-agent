@@ -38,6 +38,10 @@ class Config:
         # Parse typed configs
         self.agent = AgentConfig(config_dict.get("agent", {}))
         self.failures = config_dict.get("failures", {})
+        # name -> validated experiment (see src.schemas.ExperimentConfig)
+        self.experiments: Dict[str, Dict[str, Any]] = {
+            e["name"]: e for e in config_dict.get("experiments", [])
+        }
         kill_switch = config_dict.get("kill_switch", {})
         self.kill_switch = KillSwitchConfig(
             **{
