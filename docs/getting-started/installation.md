@@ -88,7 +88,7 @@ docker-compose up
 
 # In another terminal, check if services are running
 curl http://localhost:8080  # Target app
-curl http://localhost:8000/metrics  # Chaos agent metrics
+curl -H "Authorization: Bearer $CHAOS_METRICS_TOKEN" http://localhost:8000/metrics  # Chaos agent metrics
 ```
 
 ### Local Verification

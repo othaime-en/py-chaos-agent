@@ -64,7 +64,7 @@ securityContext:
 
 ```bash
 # Metrics show only skipped injections
-curl localhost:8000/metrics | grep chaos_injections_total
+curl -H "Authorization: Bearer $CHAOS_METRICS_TOKEN" localhost:8000/metrics | grep chaos_injections_total
 # chaos_injections_total{failure_type="cpu",status="skipped"} 100
 # chaos_injections_total{failure_type="cpu",status="success"} 0
 ```
@@ -293,7 +293,7 @@ RUN apt-get update && apt-get install -y \
 #### Symptom
 
 ```bash
-curl localhost:8000/metrics
+curl -H "Authorization: Bearer $CHAOS_METRICS_TOKEN" localhost:8000/metrics
 # curl: (7) Failed to connect to localhost port 8000: Connection refused
 ```
 
@@ -503,7 +503,7 @@ kubectl top pod -n chaos-demo
 kubectl logs -n chaos-demo <pod-name> -c chaos-agent | grep CPU
 
 # Check metrics
-curl localhost:8000/metrics | grep chaos_injection_active
+curl -H "Authorization: Bearer $CHAOS_METRICS_TOKEN" localhost:8000/metrics | grep chaos_injection_active
 # chaos_injection_active{failure_type="cpu"} 1  # Still active!
 ```
 
@@ -533,7 +533,7 @@ kubectl top pod -n chaos-demo
 
 ```bash
 # Check for stuck memory injections
-curl localhost:8000/metrics | grep memory
+curl -H "Authorization: Bearer $CHAOS_METRICS_TOKEN" localhost:8000/metrics | grep memory
 
 # Set proper resource limits
 resources:
@@ -583,9 +583,13 @@ ps auxf          # Process tree
 
 ```python
 # Python script to check metrics
+import os
 import requests
 
-response = requests.get('http://localhost:8000/metrics')
+response = requests.get(
+    'http://localhost:8000/metrics',
+    headers={'Authorization': f'Bearer {os.environ["CHAOS_METRICS_TOKEN"]}'},
+)
 for line in response.text.split('\n'):
     if 'chaos_' in line and not line.startswith('#'):
         print(line)
@@ -612,7 +616,7 @@ for line in response.text.split('\n'):
 3. **Get metrics:**
 
    ```bash
-   curl localhost:8000/metrics > metrics.txt
+   curl -H "Authorization: Bearer $CHAOS_METRICS_TOKEN" localhost:8000/metrics > metrics.txt
    ```
 
 4. **Document steps:**

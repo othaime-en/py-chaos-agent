@@ -25,8 +25,12 @@ A Python-based chaos engineering sidecar tool for testing the resilience of cont
 git clone https://github.com/othaime-en/py-chaos-agent.git
 cd py-chaos-agent
 
-# Set the API token (required; the control API will not start without one)
-echo "CHAOS_API_TOKEN=$(openssl rand -hex 32)" > .env
+# Set the two tokens (required; the agent will not start without them): one for
+# the control API, one for Prometheus to scrape metrics. They must differ.
+{
+  echo "CHAOS_API_TOKEN=$(openssl rand -hex 32)"
+  echo "CHAOS_METRICS_TOKEN=$(openssl rand -hex 32)"
+} > .env
 
 # Start the target application and chaos agent
 docker-compose up --build -d
@@ -40,7 +44,7 @@ curl -X POST -H "Authorization: Bearer $CHAOS_API_TOKEN" http://127.0.0.1:9000/a
 docker-compose logs -f chaos-agent
 
 # Access metrics
-curl http://localhost:8000/metrics
+curl -H "Authorization: Bearer $CHAOS_METRICS_TOKEN" http://localhost:8000/metrics
 
 # Access target application
 curl http://localhost:8080
@@ -53,10 +57,12 @@ curl http://localhost:8080
 docker build -t py-chaos-agent:1.0.0 -f docker/Dockerfile .
 docker build -t target-app:1.0.0 -f docker/Dockerfile.target .
 
-# Deploy to Kubernetes (the pod needs the API token Secret to start)
+# Deploy to Kubernetes (the pod needs the token Secret to start: one token for the
+# API, one for scraping metrics)
 kubectl apply -f k8s/chaos-demo.yaml
 kubectl -n chaos-demo create secret generic chaos-api-token \
-  --from-literal=token="$(openssl rand -hex 32)"
+  --from-literal=token="$(openssl rand -hex 32)" \
+  --from-literal=metrics-token="$(openssl rand -hex 32)"
 
 # View chaos agent logs
 kubectl logs -n chaos-demo -l app=resilient-app -c chaos-agent -f
@@ -65,7 +71,9 @@ kubectl logs -n chaos-demo -l app=resilient-app -c chaos-agent -f
 
 # View metrics (port 8000 is on the chaos-agent-api Service, not resilient-app)
 kubectl port-forward -n chaos-demo svc/chaos-agent-api 8000:8000
-curl http://localhost:8000/metrics
+METRICS_TOKEN=$(kubectl -n chaos-demo get secret chaos-api-token \
+  -o jsonpath='{.data.metrics-token}' | base64 -d)
+curl -H "Authorization: Bearer $METRICS_TOKEN" http://localhost:8000/metrics
 ```
 
 ## Configuration

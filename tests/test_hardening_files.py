@@ -297,3 +297,27 @@ class TestAccessControlWiring:
         assert "metrics-token" in script
         assert "the API token was accepted for metrics" in script
         assert "/audit" in script
+
+
+class TestDocumentation:
+    def all_docs(self):
+        docs = "".join(p.read_text() for p in (REPO / "docs").rglob("*.md"))
+        return docs + text("README.md")
+
+    def test_every_setting_the_code_reads_is_documented(self):
+        """A new CHAOS_* variable must be written down somewhere."""
+        names = set()
+        for path in (REPO / "src").rglob("*.py"):
+            names |= set(re.findall(r'"(CHAOS_[A-Z0-9_]+)"', path.read_text()))
+        docs = self.all_docs()
+        assert names, "found no CHAOS_* settings; has the code moved?"
+        missing = sorted(n for n in names if n not in docs)
+        assert missing == [], f"undocumented settings: {missing}"
+
+    def test_no_example_scrapes_metrics_without_a_token(self):
+        """Metrics need a token off loopback, so an unauthenticated curl in the
+        docs would send readers into a 401."""
+        for path in [REPO / "README.md", *(REPO / "docs").rglob("*.md")]:
+            for number, line in enumerate(path.read_text().splitlines(), start=1):
+                if re.search(r"curl\s+(?!-H)\S*localhost:8000/metrics", line):
+                    pytest.fail(f"{path.name}:{number} curls /metrics without a token")

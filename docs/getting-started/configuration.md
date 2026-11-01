@@ -162,7 +162,9 @@ These override or supplement the config file.
 | `LOG_FORMAT` | `json` or `text`, overriding `logging.format` |
 | `JSON_LOGS` | **Deprecated** alias: a true value (`true`, `1`, `yes`) selects JSON unless `LOG_FORMAT` is set. Use `LOG_FORMAT=json` |
 | `CHAOS_METRICS_PORT` | Metrics port, default 8000. The server refuses to start if it cannot bind it |
-| `CHAOS_API_TOKEN`, `CHAOS_API_HOST`, ... | See [API Security](../user-guide/api-security.md) |
+| `CHAOS_METRICS_HOST` | Metrics listen address. Default `127.0.0.1`. A non-loopback address needs `CHAOS_METRICS_TOKEN` |
+| `CHAOS_METRICS_TOKEN`, `CHAOS_METRICS_TOKEN_FILE` | Token Prometheus presents to scrape `/metrics`. Must differ from the API token |
+| `CHAOS_API_TOKEN`, `CHAOS_API_TOKENS_FILE`, `CHAOS_API_HOST`, `CHAOS_TLS_CERT_FILE`, `CHAOS_AUDIT_LOG_FILE`, `CHAOS_AUTH_MAX_FAILURES`, ... | See [API Security](../user-guide/api-security.md) |
 
 ## Failure Configurations
 
