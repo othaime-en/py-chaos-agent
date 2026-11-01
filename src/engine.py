@@ -40,8 +40,9 @@ import time
 import uuid
 from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import Any, Callable, List, Mapping, Optional, cast
+from typing import Any, Callable, Dict, List, Mapping, Optional, cast
 
+from .audit import audit
 from .chance import should_inject
 from .kill_switch import KillSwitch, KillSwitchOpen
 from .lifecycle import lifecycle
@@ -416,7 +417,21 @@ class ChaosEngine:
         correlation_id: str,
     ) -> None:
         set_correlation_id(correlation_id)
+        # Who: the agent's own schedule. (Injections started through the API are
+        # recorded by the API, with the person who asked.)
+        who: Dict[str, Any] = {
+            "principal": "scheduler",
+            "role": None,
+            "source": "scheduler",
+        }
         try:
+            audit.record(
+                "injection.started",
+                failure_type=name,
+                dry_run=dry_run,
+                correlation_id=correlation_id,
+                **who,
+            )
             log_failure_injection(
                 logger,
                 failure_type=name,
@@ -432,13 +447,33 @@ class ChaosEngine:
             log_failure_injection(
                 logger, failure_type=name, action="complete", status="success"
             )
+            audit.record(
+                "injection.completed",
+                failure_type=name,
+                correlation_id=correlation_id,
+                **who,
+            )
         except KillSwitchOpen as e:
             logger.warning(
                 "Injection skipped: kill switch tripped before it started",
                 extra={"failure_type": name, "reason": e.reason},
             )
             self._pause(e.reason)
+            audit.record(
+                "injection.refused",
+                failure_type=name,
+                correlation_id=correlation_id,
+                reason=e.reason,
+                **who,
+            )
         except Exception as e:
+            audit.record(
+                "injection.failed",
+                failure_type=name,
+                correlation_id=correlation_id,
+                error=str(e),
+                **who,
+            )
             logger.error(
                 "Failure injection raised exception",
                 exc_info=True,

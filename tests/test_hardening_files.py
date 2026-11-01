@@ -239,3 +239,85 @@ class TestSmokeTest:
     def test_it_does_not_stop_a_loop_that_is_not_running(self):
         """POST /agent/stop returns 400 when the loop is off."""
         assert "/agent/stop" not in text("scripts", "k8s_smoke_test.sh")
+
+
+class TestAccessControlWiring:
+    def agent_env(self):
+        _, by_name = containers()
+        return {e["name"]: e for e in by_name["chaos-agent"]["env"]}
+
+    def test_compose_requires_a_metrics_token_and_exposes_metrics_with_it(self):
+        compose = text("docker-compose.yml")
+        assert "CHAOS_METRICS_TOKEN=${CHAOS_METRICS_TOKEN:?" in compose
+        assert "CHAOS_METRICS_HOST=0.0.0.0" in compose
+
+    def test_compose_publishes_metrics_on_loopback_only(self):
+        compose = yaml.safe_load(text("docker-compose.yml"))
+        published = compose["services"]["target-app"]["ports"]
+        assert "127.0.0.1:8000:8000" in published
+        assert "8000:8000" not in published
+
+    def test_compose_keeps_the_audit_log_on_the_logs_volume(self):
+        assert "CHAOS_AUDIT_LOG_FILE=/var/log/chaos-agent/audit.log" in text(
+            "docker-compose.yml"
+        )
+
+    def test_the_env_example_has_two_different_tokens(self):
+        example = text(".env.example")
+        assert "\nCHAOS_API_TOKEN=\n" in example
+        assert "\nCHAOS_METRICS_TOKEN=\n" in example
+
+    def test_kubernetes_serves_metrics_beyond_loopback_only_with_a_token(self):
+        env = self.agent_env()
+        assert env["CHAOS_METRICS_HOST"]["value"] == "0.0.0.0"
+        assert env["CHAOS_METRICS_TOKEN_FILE"]["value"].endswith("/metrics-token")
+        assert "CHAOS_METRICS_AUTH_DISABLED" not in env
+
+    def test_the_metrics_token_comes_from_the_secret_mount(self):
+        _, by_name = containers()
+        mounts = {
+            m["name"]: m["mountPath"] for m in by_name["chaos-agent"]["volumeMounts"]
+        }
+        token_file = self.agent_env()["CHAOS_METRICS_TOKEN_FILE"]["value"]
+        assert token_file.startswith(mounts["api-token"] + "/")
+
+    def test_the_audit_log_is_on_a_writable_volume(self):
+        _, by_name = containers()
+        mounts = {m["mountPath"] for m in by_name["chaos-agent"]["volumeMounts"]}
+        audit_file = self.agent_env()["CHAOS_AUDIT_LOG_FILE"]["value"]
+        assert any(audit_file.startswith(m + "/") for m in mounts)
+        assert audit_file.startswith("/var/log/chaos-agent/")
+
+    def test_the_secret_instructions_include_the_metrics_token(self):
+        manifest = text("k8s", "chaos-demo.yaml")
+        assert '--from-literal=metrics-token="$(openssl rand -hex 32)"' in manifest
+
+    def test_the_smoke_test_checks_metrics_auth_and_the_audit_trail(self):
+        script = text("scripts", "k8s_smoke_test.sh")
+        assert "metrics-token" in script
+        assert "the API token was accepted for metrics" in script
+        assert "/audit" in script
+
+
+class TestDocumentation:
+    def all_docs(self):
+        docs = "".join(p.read_text() for p in (REPO / "docs").rglob("*.md"))
+        return docs + text("README.md")
+
+    def test_every_setting_the_code_reads_is_documented(self):
+        """A new CHAOS_* variable must be written down somewhere."""
+        names = set()
+        for path in (REPO / "src").rglob("*.py"):
+            names |= set(re.findall(r'"(CHAOS_[A-Z0-9_]+)"', path.read_text()))
+        docs = self.all_docs()
+        assert names, "found no CHAOS_* settings; has the code moved?"
+        missing = sorted(n for n in names if n not in docs)
+        assert missing == [], f"undocumented settings: {missing}"
+
+    def test_no_example_scrapes_metrics_without_a_token(self):
+        """Metrics need a token off loopback, so an unauthenticated curl in the
+        docs would send readers into a 401."""
+        for path in [REPO / "README.md", *(REPO / "docs").rglob("*.md")]:
+            for number, line in enumerate(path.read_text().splitlines(), start=1):
+                if re.search(r"curl\s+(?!-H)\S*localhost:8000/metrics", line):
+                    pytest.fail(f"{path.name}:{number} curls /metrics without a token")

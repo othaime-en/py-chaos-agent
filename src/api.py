@@ -4,7 +4,7 @@ FastAPI interface for Py-Chaos-Agent control.
 Provides programmatic control over chaos injections through REST API.
 """
 
-from fastapi import Depends, FastAPI, HTTPException, BackgroundTasks
+from fastapi import Depends, FastAPI, HTTPException, BackgroundTasks, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 from typing import Optional, Dict, Any, List
 from enum import Enum
@@ -14,6 +14,7 @@ import time
 from datetime import datetime, timezone
 from contextlib import asynccontextmanager, nullcontext
 
+from .audit import AuditError, AuditMiddleware, annotate, audit
 from .auth import auth_disabled, get_expected_token, require_auth
 from . import limits
 from .config import Config, load_config, validate_config
@@ -149,6 +150,13 @@ async def lifespan(app: FastAPI):
     """Lifespan event handler for startup and shutdown."""
     # Startup
     try:
+        # A requested audit file that cannot be written stops startup: running
+        # without the record the operator asked for is worse than not running.
+        audit.configure_from_env()
+    except AuditError as e:
+        logger.critical("Audit log unavailable", extra={"error": str(e)})
+        raise
+    try:
         config = load_config()
         agent_state.config = config
         logger.info("API started, configuration loaded")
@@ -217,6 +225,9 @@ app = FastAPI(
     redoc_url="/redoc" if _docs_enabled else None,
     openapi_url="/openapi.json" if _docs_enabled else None,
 )
+
+
+app.add_middleware(AuditMiddleware)
 
 
 class FailureType(str, Enum):
@@ -331,7 +342,7 @@ async def get_status():
 
 
 @app.post("/agent/start", tags=["Agent Control"])
-async def start_agent(enable_kill_switch: Optional[bool] = None):
+async def start_agent(http_request: Request, enable_kill_switch: Optional[bool] = None):
     """
     Start the chaos agent loop.
 
@@ -339,6 +350,7 @@ async def start_agent(enable_kill_switch: Optional[bool] = None):
     not by this request. ``enable_kill_switch=false`` is honored only if the
     config sets ``kill_switch.allow_api_disable: true``; otherwise it is refused.
     """
+    annotate(http_request, enable_kill_switch=enable_kill_switch)
     if agent_state.enabled:
         raise HTTPException(status_code=400, detail="Agent already running")
 
@@ -403,13 +415,13 @@ async def stop_agent():
 
 
 @app.post("/agent/restart", tags=["Agent Control"])
-async def restart_agent():
+async def restart_agent(http_request: Request):
     """Restart the chaos agent loop."""
     if agent_state.enabled:
         await stop_agent()
         time.sleep(1)
 
-    return await start_agent()
+    return await start_agent(http_request)
 
 
 @app.get("/kill-switch/status", tags=["Kill Switch"])
@@ -451,7 +463,9 @@ async def reset_kill_switch():
 
 @app.post("/inject/manual", tags=["Injections"])
 async def manual_injection(
-    request: ManualInjectionRequest, background_tasks: BackgroundTasks
+    request: ManualInjectionRequest,
+    background_tasks: BackgroundTasks,
+    http_request: Request,
 ):
     """
     Manually trigger a single failure injection.
@@ -460,6 +474,7 @@ async def manual_injection(
     """
     config = get_config()
     failure_type = request.failure_type.value
+    annotate(http_request, failure_type=failure_type, dry_run=request.dry_run)
 
     if failure_type not in config.failures:
         raise HTTPException(
@@ -524,20 +539,53 @@ async def manual_injection(
         extra={"failure_type": failure_type, "dry_run": request.dry_run},
     )
 
+    who = getattr(http_request.state, "principal", None)
+    audit_who: Dict[str, Any] = {
+        "principal": who.name if who else "unknown",
+        "role": who.role if who else None,
+    }
+
     def inject():
+        audit.record(
+            "injection.started",
+            failure_type=failure_type,
+            dry_run=request.dry_run,
+            source="manual",
+            **audit_who,
+        )
         try:
             # Re-checked here (not just above) in case the breaker tripped
             # between the request and the background task starting. Also records
             # the injection so a process kill earns its grace period.
             with ks.injection(failure_type, request.dry_run) if ks else nullcontext():
                 run_injection(failure_type, failure_config, request.dry_run)
+            audit.record(
+                "injection.completed",
+                failure_type=failure_type,
+                source="manual",
+                **audit_who,
+            )
         except KillSwitchOpen as e:
             logger.warning(
                 "Manual injection skipped: kill switch tripped before it started",
                 extra={"failure_type": failure_type, "reason": e.reason},
             )
+            audit.record(
+                "injection.refused",
+                failure_type=failure_type,
+                source="manual",
+                reason=e.reason,
+                **audit_who,
+            )
         except Exception as e:
             logger.error(f"Manual injection failed: {e}", exc_info=True)
+            audit.record(
+                "injection.failed",
+                failure_type=failure_type,
+                source="manual",
+                error=str(e),
+                **audit_who,
+            )
 
     # Run in background to not block API
     background_tasks.add_task(inject)
@@ -624,7 +672,7 @@ async def get_failure_config(failure_type: FailureType):
 
 
 @app.patch("/config", tags=["Configuration"])
-async def update_config(request: ConfigUpdateRequest):
+async def update_config(request: ConfigUpdateRequest, http_request: Request):
     """
     Update agent configuration dynamically.
 
@@ -670,6 +718,7 @@ async def update_config(request: ConfigUpdateRequest):
             config.failures[name] = new_config
             changes[f"failures.{name}"] = new_config
 
+    annotate(http_request, changes=changes)
     logger.info("Configuration updated via API", extra={"changes": changes})
 
     return {
@@ -686,7 +735,7 @@ async def update_config(request: ConfigUpdateRequest):
 
 @app.patch("/config/failures/{failure_type}", tags=["Configuration"])
 async def update_failure_config(
-    failure_type: FailureType, config_update: Dict[str, Any]
+    failure_type: FailureType, config_update: Dict[str, Any], http_request: Request
 ):
     """Update configuration for a specific failure type."""
     config = get_config()
@@ -709,6 +758,7 @@ async def update_failure_config(
     with agent_state.config_lock:
         config.failures[failure_name] = validated
 
+    annotate(http_request, failure_type=failure_name, updates=config_update)
     logger.info(
         f"Updated {failure_name} configuration",
         extra={"failure_type": failure_name, "updates": config_update},
@@ -766,6 +816,22 @@ async def reload_config():
 # ============================================================================
 # Metrics & Monitoring
 # ============================================================================
+
+
+@app.get("/audit", tags=["Audit"])
+async def read_audit_log(
+    limit: int = Query(100, ge=1, le=500),
+    principal: Optional[str] = None,
+    event: Optional[str] = None,
+):
+    """
+    The latest audit events, newest first (admin only).
+
+    This is the in-memory view of the last 500 events. The complete record is the
+    audit log file (CHAOS_AUDIT_LOG_FILE) and the ``chaos.audit`` log stream.
+    """
+    events = audit.recent(limit=limit, principal=principal, event=event)
+    return {"count": len(events), "events": events}
 
 
 @app.get("/metrics/summary", tags=["Metrics"])

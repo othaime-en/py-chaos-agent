@@ -150,7 +150,9 @@ that was then aborted look like a success.
   startup continues, so a port that is already in use stops the process with a
   clear error
 - Uses prometheus_client library
-- Exposed on port 8000 at `/metrics` (change it with `CHAOS_METRICS_PORT`)
+- Exposed on port 8000 at `/metrics` (change it with `CHAOS_METRICS_PORT`), on
+  loopback unless `CHAOS_METRICS_HOST` says otherwise, and behind a scrape token
+  on any other address (see [API Security](api-security.md))
 
 ## Data Flow
 

@@ -94,8 +94,9 @@ class TestServerStart:
             server.shutdown()
             server.server_close()
 
-    def test_the_default_address_is_all_interfaces_as_before(self):
-        assert metrics.DEFAULT_METRICS_ADDR == "0.0.0.0"
+    def test_the_default_address_is_loopback(self):
+        """It used to be every interface, with no credentials."""
+        assert metrics.DEFAULT_METRICS_ADDR == "127.0.0.1"
 
     def test_only_a_port_conflict_gets_the_free_port_hint(self, busy_port):
         with pytest.raises(MetricsServerError) as conflict:

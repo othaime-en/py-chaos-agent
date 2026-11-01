@@ -69,6 +69,19 @@ services:
       - CHAOS_API_HOST=0.0.0.0
       # Required. Compose refuses to start without it. See .env.example.
       - CHAOS_API_TOKEN=${CHAOS_API_TOKEN:?Set CHAOS_API_TOKEN, e.g. openssl rand -hex 32}
+      # Metrics listen on loopback unless told otherwise. The published host port
+      # above needs them reachable inside the container, which requires a scrape
+      # token (different from the API token). Prometheus sends it as
+      # "authorization: credentials: <token>".
+      - CHAOS_METRICS_HOST=0.0.0.0
+      - CHAOS_METRICS_TOKEN=${CHAOS_METRICS_TOKEN:?Set CHAOS_METRICS_TOKEN, e.g. openssl rand -hex 32}
+      # Who did what, one JSON object per line, on the logs volume. Read the recent
+      # events through GET /audit (admin) or ship this file to a log store.
+      - CHAOS_AUDIT_LOG_FILE=/var/log/chaos-agent/audit.log
+      # Optional hardening, see docs/user-guide/api-security.md:
+      #   CHAOS_API_TOKENS_FILE=/run/secrets/tokens.yaml   per-user tokens with roles
+      #   CHAOS_TLS_CERT_FILE / CHAOS_TLS_KEY_FILE         serve HTTPS (the healthcheck
+      #                                                    below would then need https)
     healthcheck:
       # The image has Python but not curl. urlopen raises on a connection error
       # or any non-2xx response, which makes the check exit non-zero.

@@ -8,13 +8,18 @@ Binds to 127.0.0.1 by default and requires an API token (see src/auth.py).
 To listen on other interfaces, set a token and opt in explicitly:
     CHAOS_API_TOKEN=$(openssl rand -hex 32) \
         python -m src.api_server --host 0.0.0.0 --port 9000
+
+Add TLS (see src/tls.py) so the token does not cross the network in clear text:
+    python -m src.api_server --host 0.0.0.0 \
+        --tls-cert fullchain.pem --tls-key privkey.pem
 """
 
 import uvicorn
 import argparse
 import os
 import signal
-from . import auth
+from . import auth, tls
+from .audit import AuditError, audit
 from .lifecycle import lifecycle
 from .logging_config import setup_logging, get_logger
 from .metrics import MetricsServerError, metrics_port_from_env, start_metrics_server
@@ -65,6 +70,24 @@ def main():
         ),
     )
     parser.add_argument(
+        "--tls-cert",
+        default=None,
+        help="PEM certificate (chain) to serve HTTPS. Default: CHAOS_TLS_CERT_FILE.",
+    )
+    parser.add_argument(
+        "--tls-key",
+        default=None,
+        help="PEM private key for --tls-cert. Default: CHAOS_TLS_KEY_FILE.",
+    )
+    parser.add_argument(
+        "--tls-client-ca",
+        default=None,
+        help=(
+            "Require clients to present a certificate signed by this CA (mutual "
+            "TLS). Default: CHAOS_TLS_CLIENT_CA_FILE."
+        ),
+    )
+    parser.add_argument(
         "--reload",
         action="store_true",
         help="Enable auto-reload for development",
@@ -102,11 +125,33 @@ def main():
         # Propagate to the app (also covers uvicorn --reload subprocesses).
         os.environ[auth.AUTH_DISABLED_ENV] = "true"
 
+    try:
+        tls_settings = tls.settings_from_env(
+            args.tls_cert, args.tls_key, args.tls_client_ca
+        )
+    except tls.TlsError as e:
+        raise SystemExit(f"Refusing to start: {e}")
+    tls.validate_startup(args.host, tls_settings)
+    if tls_settings is not None:
+        # Propagate flags to the environment so the metrics server uses the same
+        # certificate (and uvicorn --reload subprocesses see it).
+        os.environ[tls.CERT_ENV] = tls_settings.cert_file
+        os.environ[tls.KEY_ENV] = tls_settings.key_file
+        if tls_settings.client_ca_file:
+            os.environ[tls.CLIENT_CA_ENV] = tls_settings.client_ca_file
+
+    # A requested audit file that cannot be written stops startup too.
+    try:
+        audit.configure_from_env()
+    except AuditError as e:
+        raise SystemExit(f"Refusing to start: {e}")
+
     logger.info(
         "Starting Py-Chaos-Agent API Server",
         extra={
             "api_host": args.host,
             "api_port": args.port,
+            "tls": tls_settings is not None,
             "metrics_port": args.metrics_port,  # None: from CHAOS_METRICS_PORT or 8000
         },
     )
@@ -137,6 +182,7 @@ def main():
             port=args.port,
             reload=True,
             log_level=args.log_level.lower(),
+            **tls.uvicorn_options(tls_settings),
         )
     else:
         server = ChaosServer(
@@ -145,6 +191,7 @@ def main():
                 host=args.host,
                 port=args.port,
                 log_level=args.log_level.lower(),
+                **tls.uvicorn_options(tls_settings),
             )
         )
         server.run()
