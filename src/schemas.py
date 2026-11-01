@@ -68,6 +68,36 @@ def _clean_errors(exc: ValidationError, prefix: tuple = ()) -> List[Dict[str, An
     return cleaned
 
 
+def check_http_url(value: str, field: str) -> str:
+    """
+    Validate an http(s) URL that the agent will call on its own initiative.
+
+    Shared by the kill switch health URL and the experiment steady-state checks,
+    so both reject the same things: a bad scheme, no host, whitespace, and
+    credentials (which would end up in logs).
+    """
+    value = value.strip()
+    if not value or len(value) > limits.MAX_HEALTH_URL_LENGTH:
+        raise ValueError(
+            f"{field} must be 1 to {limits.MAX_HEALTH_URL_LENGTH} characters"
+        )
+    if any(c.isspace() for c in value):
+        raise ValueError(f"{field} must not contain whitespace")
+    try:
+        parsed = urlparse(value)
+    except ValueError:
+        raise ValueError(f"{field} is not a valid URL") from None
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(f"{field} must start with http:// or https://")
+    if not parsed.hostname:
+        raise ValueError(f"{field} must include a host")
+    if parsed.username or parsed.password:
+        raise ValueError(
+            f"{field} must not contain credentials; they would be written to logs"
+        )
+    return value
+
+
 class _StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
@@ -239,28 +269,7 @@ class KillSwitchSettings(_StrictModel):
     @field_validator("target_health_url")
     @classmethod
     def _check_url(cls, value: str) -> str:
-        value = value.strip()
-        if not value or len(value) > limits.MAX_HEALTH_URL_LENGTH:
-            raise ValueError(
-                f"target_health_url must be 1 to {limits.MAX_HEALTH_URL_LENGTH} "
-                "characters"
-            )
-        if any(c.isspace() for c in value):
-            raise ValueError("target_health_url must not contain whitespace")
-        try:
-            parsed = urlparse(value)
-        except ValueError:
-            raise ValueError("target_health_url is not a valid URL") from None
-        if parsed.scheme not in ("http", "https"):
-            raise ValueError("target_health_url must start with http:// or https://")
-        if not parsed.hostname:
-            raise ValueError("target_health_url must include a host")
-        if parsed.username or parsed.password:
-            raise ValueError(
-                "target_health_url must not contain credentials; they would be "
-                "written to logs"
-            )
-        return value
+        return check_http_url(value, "target_health_url")
 
     @model_validator(mode="after")
     def _timeout_fits_interval(self) -> "KillSwitchSettings":
