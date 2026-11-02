@@ -20,6 +20,7 @@ Rules, applied uniformly:
 import re
 from urllib.parse import urlparse
 from typing import Annotated, Any, Dict, List, Literal, Mapping, Optional, Type
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from pydantic import model_validator
@@ -289,6 +290,9 @@ _EXPERIMENT_NAME_PATTERN = (
     rf"^[a-z0-9][a-z0-9._-]{{0,{limits.MAX_EXPERIMENT_NAME_LENGTH - 1}}}$"
 )
 _CHECK_NAME_PATTERN = r"^[a-z0-9][a-z0-9._-]{0,63}$"
+Weekday = Literal["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+_START_TIME_PATTERN = r"^([01][0-9]|2[0-3]):[0-5][0-9]$"
+_END_TIME_PATTERN = r"^(([01][0-9]|2[0-3]):[0-5][0-9]|24:00)$"
 
 
 class HttpCheckConfig(_StrictModel):
@@ -443,6 +447,59 @@ class ExperimentFaults(_StrictModel):
         return self
 
 
+def _every_day() -> List[Weekday]:
+    return ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+
+
+class TimeWindow(_StrictModel):
+    """
+    Weekdays plus a start and an end time. See ``src.windows`` for the rules
+    (end exclusive, past midnight when end is not after start, ``24:00`` ok).
+    """
+
+    days: List[Weekday] = Field(default_factory=_every_day, min_length=1, max_length=7)
+    start: str = Field(pattern=_START_TIME_PATTERN)
+    end: str = Field(pattern=_END_TIME_PATTERN)
+
+    @field_validator("days")
+    @classmethod
+    def _unique_days(cls, value: List[str]) -> List[str]:
+        if len(set(value)) != len(value):
+            raise ValueError("days must not repeat")
+        return value
+
+    @model_validator(mode="after")
+    def _not_empty(self) -> "TimeWindow":
+        if self.start == self.end:
+            raise ValueError(
+                "start and end must differ (use 00:00 to 24:00 for a whole day)"
+            )
+        return self
+
+
+class ExperimentWindows(_StrictModel):
+    """When an experiment may run. Outside every window it will not start."""
+
+    timezone: str = "UTC"
+    allow: List[TimeWindow] = Field(min_length=1, max_length=limits.MAX_TIME_WINDOWS)
+
+    @field_validator("timezone")
+    @classmethod
+    def _known_timezone(cls, value: str) -> str:
+        if not value or len(value) > limits.MAX_TIMEZONE_LENGTH:
+            raise ValueError(
+                f"timezone must be 1 to {limits.MAX_TIMEZONE_LENGTH} characters"
+            )
+        try:
+            ZoneInfo(value)
+        except (ZoneInfoNotFoundError, ValueError, OSError):
+            raise ValueError(
+                f"unknown timezone '{value}'; use an IANA name such as "
+                "'UTC' or 'Europe/Berlin'"
+            ) from None
+        return value
+
+
 class ExperimentConfig(_StrictModel):
     """
     A named, self-contained chaos experiment.
@@ -458,6 +515,7 @@ class ExperimentConfig(_StrictModel):
     steady_state: SteadyStateConfig
     faults: ExperimentFaults
     schedule: ExperimentSchedule
+    windows: Optional[ExperimentWindows] = None
     dry_run: bool = False
 
     @field_validator("hypothesis")
