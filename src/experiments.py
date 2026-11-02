@@ -21,6 +21,11 @@ What this does not do yet: the steady state is checked before and after the chao
 not while it runs. Watching it during the run, and stopping early when it is
 breached, is the job of the SLO abort feature.
 
+If the experiment has time windows (see ``src.windows``) it will not start
+outside them, or when the window will close before its chaos could finish, and a
+run whose window closes mid-way is aborted. Dry runs are exempt: they change
+nothing.
+
 Only one experiment runs at a time, and the API refuses to start one while the
 agent loop is running (and the other way round), so two sources of chaos can never
 overlap and make a result unreadable.
@@ -42,6 +47,7 @@ from .kill_switch import KillSwitch
 from .lifecycle import lifecycle
 from .logging_config import get_logger
 from .metrics import EXPERIMENT_ACTIVE, EXPERIMENTS_TOTAL
+from . import windows as time_windows
 from .steady_state import SteadyStateResult, wait_for_steady_state
 
 logger = get_logger(__name__)
@@ -56,6 +62,32 @@ _ABORT_TIMEOUT_SECONDS = 10.0
 
 class ExperimentBusy(RuntimeError):
     """An experiment is already running."""
+
+
+class OutsideWindow(RuntimeError):
+    """The experiment may not start now: its allowed time window is closed, or
+    will close before the chaos could finish."""
+
+
+def chaos_budget_seconds(experiment: Mapping[str, Any]) -> float:
+    """
+    The longest the chaos phase of ``experiment`` can last, worst case.
+
+    That is the scheduled duration (or, with ``max_injections``, the time until
+    the last allowed injection starts) plus the longest single fault, which may
+    still be running when the schedule ends. The baseline and recovery checks
+    are not chaos and are not counted.
+    """
+    schedule = experiment["schedule"]
+    active = float(schedule["duration_seconds"])
+    cap = schedule.get("max_injections")
+    if cap is not None:
+        active = min(active, (cap - 1) * float(schedule["interval_seconds"]))
+    longest = max(
+        (f.get("duration_seconds", 0) for f in experiment["faults"].values()),
+        default=0,
+    )
+    return active + longest
 
 
 class RunStatus(str, Enum):
@@ -104,6 +136,7 @@ class ExperimentRun:
     started_at: Optional[float] = None
     finished_at: Optional[float] = None
     injections_started: int = 0
+    window_closes_at: Optional[dt.datetime] = None
     baseline: Optional[SteadyStateResult] = None
     recovery: Optional[SteadyStateResult] = None
 
@@ -131,6 +164,7 @@ class ExperimentRun:
             "finished_at": _iso(self.finished_at),
             "duration_seconds": duration,
             "injections_started": self.injections_started,
+            "window_closes_at": time_windows.iso(self.window_closes_at),
             "baseline": self.baseline.to_dict() if self.baseline else None,
             "recovery": self.recovery.to_dict() if self.recovery else None,
         }
@@ -147,6 +181,8 @@ class ExperimentRunner:
         injector: ``(name, cfg, dry_run) -> None``, passed to the engine.
             Defaults to the real injectors. Injectable for tests.
         history_size: How many runs (running and finished) to remember.
+        clock: Returns the current time (timezone-aware) for the time windows.
+            Defaults to the real clock. Injectable for tests.
     """
 
     def __init__(
@@ -154,9 +190,11 @@ class ExperimentRunner:
         kill_switch_provider: Optional[Callable[[], Optional[KillSwitch]]] = None,
         injector: Optional[Callable[[str, Mapping[str, Any], bool], None]] = None,
         history_size: int = HISTORY_SIZE,
+        clock: Optional[Callable[[], dt.datetime]] = None,
     ) -> None:
         self._ks_provider = kill_switch_provider or (lambda: None)
         self._injector = injector
+        self._clock = clock
         self._lock = threading.RLock()
         self._history: Deque[ExperimentRun] = deque(maxlen=history_size)
         self._current: Optional[ExperimentRun] = None
@@ -204,7 +242,9 @@ class ExperimentRunner:
         Start ``experiment`` (a validated experiment dict) and return the new run.
 
         ``dry_run`` overrides the experiment's own setting when given. Raises
-        :class:`ExperimentBusy` if another experiment is running.
+        :class:`ExperimentBusy` if another experiment is running, and
+        :class:`OutsideWindow` if its time windows are closed or too short for
+        it. A dry run changes nothing, so the windows do not apply to it.
         """
         # A private copy: a config reload while the experiment runs must not
         # change it halfway.
@@ -215,6 +255,8 @@ class ExperimentRunner:
                 raise ExperimentBusy(
                     f"Experiment '{self._current.experiment}' is already running"
                 )
+            if not effective_dry_run:
+                self._check_window(exp)
             run = ExperimentRun(
                 id=uuid.uuid4().hex[:12],
                 experiment=exp["name"],
@@ -267,6 +309,34 @@ class ExperimentRunner:
         thread = self._thread
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout)
+
+    # -- time windows ----------------------------------------------------------------
+
+    def _now(self) -> dt.datetime:
+        return self._clock() if self._clock else time_windows.utcnow()
+
+    def _check_window(self, exp: Mapping[str, Any]) -> None:
+        """Raise OutsideWindow unless the chaos can start now and finish in time."""
+        spec = exp.get("windows")
+        if not spec:
+            return
+        now = self._now()
+        status = time_windows.evaluate(spec, now)
+        if not status.open:
+            raise OutsideWindow(
+                "Outside the allowed time window; the next one opens "
+                + time_windows.format_local(status.opens_at, spec)
+            )
+        assert status.closes_at is not None
+        needed = chaos_budget_seconds(exp)
+        remaining = (status.closes_at - now).total_seconds()
+        if needed > remaining:
+            raise OutsideWindow(
+                f"Not enough time left in the allowed window: it closes "
+                f"{time_windows.format_local(status.closes_at, spec)}, in "
+                f"{int(remaining)}s, and this experiment needs up to "
+                f"{int(needed)}s of chaos"
+            )
 
     # -- the run -------------------------------------------------------------------
 
@@ -373,9 +443,25 @@ class ExperimentRunner:
             )
             return
 
+        # The baseline can take a while: make sure the window is still open now.
+        window_closes_at = None
+        spec = exp.get("windows")
+        if spec and not run.dry_run:
+            status = time_windows.evaluate(spec, self._now())
+            if not status.open:
+                self._finish(
+                    run,
+                    RunStatus.REFUSED,
+                    Verdict.INCONCLUSIVE,
+                    "the allowed time window closed before the chaos could start",
+                )
+                return
+            window_closes_at = status.closes_at
+            self._update(run, window_closes_at=window_closes_at)
+
         # 2. Chaos
         self._update(run, status=RunStatus.RUNNING)
-        abort_reason = self._inject(run, exp)
+        abort_reason = self._inject(run, exp, window_closes_at)
         if self._shutting_down or lifecycle.is_shutting_down():
             self._finish(
                 run, RunStatus.ABORTED, Verdict.INCONCLUSIVE, abort_reason or "shutdown"
@@ -405,7 +491,12 @@ class ExperimentRunner:
                 f"{steady_state['recovery_timeout_seconds']}s of the chaos ending",
             )
 
-    def _inject(self, run: ExperimentRun, exp: Dict[str, Any]) -> Optional[str]:
+    def _inject(
+        self,
+        run: ExperimentRun,
+        exp: Dict[str, Any],
+        window_closes_at: Optional[dt.datetime] = None,
+    ) -> Optional[str]:
         """
         Run the chaos phase. Returns why it was cut short, or ``None`` if it ran
         its schedule to the end. Always leaves the engine stopped.
@@ -433,7 +524,9 @@ class ExperimentRunner:
         )
         engine.start()
         try:
-            abort_reason = self._hold(engine, schedule["duration_seconds"], run.dry_run)
+            abort_reason = self._hold(
+                engine, schedule["duration_seconds"], run.dry_run, window_closes_at
+            )
             if abort_reason is None:
                 longest = max(
                     (f.get("duration_seconds", 0) for f in faults.values()), default=0
@@ -455,7 +548,11 @@ class ExperimentRunner:
         return abort_reason
 
     def _hold(
-        self, engine: ChaosEngine, duration: float, dry_run: bool
+        self,
+        engine: ChaosEngine,
+        duration: float,
+        dry_run: bool,
+        window_closes_at: Optional[dt.datetime] = None,
     ) -> Optional[str]:
         """Wait until the chaos phase should end. Returns an abort reason or None."""
         deadline = time.monotonic() + duration
@@ -464,6 +561,8 @@ class ExperimentRunner:
                 return self._abort_reason
             if lifecycle.is_shutting_down():
                 return "agent shutting down"
+            if window_closes_at is not None and self._now() >= window_closes_at:
+                return "the allowed time window closed"
             ks = self._ks_provider()
             if ks is not None and not dry_run:
                 allowed, why = ks.allows_injection()

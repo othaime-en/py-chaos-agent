@@ -49,7 +49,7 @@ def _minutes(text: str) -> int:
     return int(hours) * 60 + int(minutes)
 
 
-def _iso(moment: Optional[dt.datetime]) -> Optional[str]:
+def iso(moment: Optional[dt.datetime]) -> Optional[str]:
     if moment is None:
         return None
     utc = moment.astimezone(dt.timezone.utc)
@@ -73,9 +73,9 @@ class WindowStatus:
     def to_dict(self) -> Dict[str, Any]:
         data: Dict[str, Any] = {"open": self.open}
         if self.open:
-            data["closes_at"] = _iso(self.closes_at)
+            data["closes_at"] = iso(self.closes_at)
         else:
-            data["opens_at"] = _iso(self.opens_at)
+            data["opens_at"] = iso(self.opens_at)
         return data
 
 
