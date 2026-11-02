@@ -168,6 +168,13 @@ experiments:
       duration_seconds: 60
       interval_seconds: 15
       max_injections: 3
+    # Optional: only allow runs in these windows (outside them the API refuses).
+    # windows:
+    #   timezone: UTC
+    #   allow:
+    #     - days: [mon, tue, wed, thu]
+    #       start: "10:00"
+    #       end: "16:00"
 
 # Example configurations for different environments:
 

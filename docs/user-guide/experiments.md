@@ -89,6 +89,7 @@ after the chaos with each check's outcome and latency.
 | `steady_state` | required | See below. |
 | `faults` | required | One or more of `cpu`, `memory`, `process`, `network`. |
 | `schedule` | required | See below. |
+| `windows` | none | When the experiment may run. See [Time windows](#time-windows). Without it, always. |
 | `dry_run` | `false` | Log what would happen without doing it. The API can override it per run. |
 
 ### `steady_state`
@@ -132,6 +133,63 @@ be able to fire.
 | `interval_seconds` | 10 | 1 to 3600 | Time between rolls. |
 | `max_injections` | none | 1 to 1000 | Stop after this many injections have started. Dry runs count. |
 
+## Time windows
+
+A window set limits **when** an experiment may run, so chaos only happens when
+people are around to watch it (and not during a release freeze, a sale, or the
+night shift's quiet hours).
+
+```yaml
+experiments:
+  - name: cpu-recovery
+    # ...
+    windows:
+      timezone: Africa/Dar_es_Salaam   # IANA name, default UTC
+      allow:
+        - days: [mon, tue, wed, thu]
+          start: "10:00"
+          end: "16:00"
+        - days: [fri]
+          start: "10:00"
+          end: "12:00"
+```
+
+| Field | Default | Notes |
+| --- | --- | --- |
+| `timezone` | `UTC` | An IANA name such as `Europe/Berlin`. Unknown names are a config error. |
+| `allow` | required | 1 to 20 windows. |
+| `allow[].days` | every day | Any of `mon` to `sun`. The day the window **starts** on. |
+| `allow[].start` | required | `HH:MM`, 24-hour, `00:00` to `23:59`. |
+| `allow[].end` | required | `HH:MM`, or `24:00` for midnight. Must differ from `start`. |
+
+How the rules work:
+
+- A window is open from `start` (inclusive) to `end` (exclusive).
+- If `end` is not later than `start`, the window runs past midnight. With
+  `days: [fri]`, `22:00` to `02:00` is open on Saturday at 01:00 and closed on
+  Sunday at 01:00. Use `00:00` to `24:00` for a whole day.
+- Windows that overlap or touch count as one continuous window.
+- Times are wall-clock times in `timezone`. On a daylight-saving change day the
+  window keeps its clock times, so it is an hour shorter or longer. A boundary
+  inside the skipped or repeated hour resolves the way Python's `zoneinfo` does.
+
+What the agent does with them:
+
+| When | What happens |
+| --- | --- |
+| You start a run outside every window | Refused with `409`. The message gives the next opening in the window's own zone. No run is created and nothing is probed. |
+| You start a run but the chaos would outlast the window | Refused with `409`. The estimate is the schedule plus the longest single fault (with `max_injections`, the time until the last allowed injection starts, plus the longest fault). The baseline and recovery checks are not counted. |
+| The window closes during the baseline check | The run ends `refused`. Nothing was injected. |
+| The window closes during the chaos | The run is aborted, injections are cut short and their effects removed. Verdict `inconclusive`, reason "the allowed time window closed". |
+| Dry run | Windows do not apply. A dry run changes nothing, so you can test any time. |
+
+There is no override in the API. A window is a safety limit; to change it, edit
+the config and `POST /config/reload`. The windows decide only whether a run may
+happen. Nothing starts an experiment on its own, so a window never triggers one.
+
+`GET /experiments` and `GET /experiments/{name}` show whether each window is open
+now and when it closes or next opens (UTC), and a run reports `window_closes_at`.
+
 ## API
 
 | Endpoint | Role | |
@@ -155,12 +213,12 @@ changes for the next run; a run in progress keeps the copy it started with.
 | Status | When |
 | --- | --- |
 | `404` | No such experiment. |
-| `409` | The agent loop is running; another experiment is running; an injection is running; or the kill switch is holding chaos back. |
+| `409` | The agent loop is running; another experiment is running; an injection is running; the kill switch is holding chaos back; or the experiment is outside its [time windows](#time-windows) (or would not finish before one closes). |
 | `422` | A fault does not fit the container's resource budget (same rule as a manual injection), or the body is invalid. |
 | `503` | The agent is shutting down. |
 
-Dry runs skip the injection, kill switch and budget refusals, since they change
-nothing.
+Dry runs skip the injection, kill switch, budget and time window refusals, since
+they change nothing.
 
 While an experiment runs, `POST /agent/start` and non-dry-run `POST /inject/manual`
 return `409`. Two sources of chaos at once would make the result unreadable.
@@ -172,6 +230,7 @@ return `409`. Two sources of chaos at once would make the result unreadable.
 - Stop an experiment with `POST /experiment-runs/abort`, not `POST /agent/stop`
   (that one only stops the agent loop). `POST /inject/abort` cuts running
   injections short, but the experiment keeps rolling its schedule.
+- A closing time window aborts a running experiment the same way.
 - Shutdown aborts a running experiment and removes its effects before exiting.
 - Every start and finish is in the audit log (`experiment.started`,
   `experiment.finished`). The injections inside a run are recorded with

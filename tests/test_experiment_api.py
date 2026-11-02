@@ -1,5 +1,6 @@
 """Running and inspecting experiments through the API."""
 
+import datetime as dt
 import time
 from types import SimpleNamespace
 
@@ -161,6 +162,7 @@ class TestListAndShow:
             "faults": ["cpu"],
             "duration_seconds": 0.3,
             "dry_run": False,
+            "window": None,
         }
 
     def test_show_one(self, client, configured):
@@ -401,3 +403,82 @@ class TestAudit:
         assert injection["source"] == "experiment"
         assert injection["principal"] == "shared-token"
         assert injection["run_id"] == rid
+
+
+class TestTimeWindows:
+    WINDOWS = {
+        "timezone": "Africa/Dar_es_Salaam",
+        "allow": [{"days": ["mon"], "start": "10:00", "end": "16:00"}],
+    }
+
+    @pytest.fixture
+    def clock(self, monkeypatch, configured):
+        """Monday 2026-11-02 12:00 UTC, which is 15:00 in Dar es Salaam."""
+        state = {"now": dt.datetime(2026, 11, 2, 12, 0, tzinfo=dt.timezone.utc)}
+        monkeypatch.setattr("src.windows.utcnow", lambda: state["now"])
+        configured.experiments["cpu-spike"]["windows"] = self.WINDOWS
+        return state
+
+    def test_the_list_shows_whether_each_window_is_open(self, client, clock):
+        by_name = {
+            e["name"]: e for e in client.get("/experiments").json()["experiments"]
+        }
+        assert by_name["cpu-spike"]["window"] == {
+            "timezone": "Africa/Dar_es_Salaam",
+            "open": True,
+            "closes_at": "2026-11-02T13:00:00Z",
+        }
+        assert by_name["other"]["window"] is None
+
+    def test_a_closed_window_says_when_it_opens(self, client, clock):
+        clock["now"] = dt.datetime(2026, 11, 2, 15, 0, tzinfo=dt.timezone.utc)
+        window = client.get("/experiments").json()["experiments"][0]["window"]
+        assert window == {
+            "timezone": "Africa/Dar_es_Salaam",
+            "open": False,
+            "opens_at": "2026-11-09T07:00:00Z",
+        }
+
+    def test_show_includes_the_windows_and_their_state(self, client, clock):
+        body = client.get("/experiments/cpu-spike").json()
+        assert body["windows"] == self.WINDOWS
+        assert body["window_status"]["open"] is True
+        assert client.get("/experiments/other").json()["window_status"] is None
+
+    def test_inside_the_window_it_runs(self, client, clock):
+        response = client.post("/experiments/cpu-spike/run")
+        assert response.status_code == 202
+        result = wait_finished(client, run_id(response))
+        assert result["status"] == "completed"
+        assert result["window_closes_at"] == "2026-11-02T13:00:00Z"
+
+    def test_outside_the_window_it_is_a_409_that_says_when(self, client, clock):
+        clock["now"] = dt.datetime(
+            2026, 11, 3, 12, 0, tzinfo=dt.timezone.utc
+        )  # Tuesday
+        runs_before = client.get("/experiment-runs").json()["count"]
+        response = client.post("/experiments/cpu-spike/run")
+        assert response.status_code == 409
+        detail = response.json()["detail"]
+        assert "Outside the allowed time window" in detail
+        assert "Mon 2026-11-09 10:00 (Africa/Dar_es_Salaam)" in detail
+        assert not agent_state.experiments.is_running
+        assert client.get("/experiment-runs").json()["count"] == runs_before
+
+    def test_too_little_time_left_is_a_409(self, client, clock):
+        clock["now"] = dt.datetime(2026, 11, 2, 12, 59, 58, tzinfo=dt.timezone.utc)
+        response = client.post("/experiments/cpu-spike/run")
+        assert response.status_code == 409
+        assert "Not enough time left" in response.json()["detail"]
+
+    def test_a_dry_run_ignores_the_window(self, client, clock):
+        clock["now"] = dt.datetime(2026, 11, 3, 12, 0, tzinfo=dt.timezone.utc)
+        response = client.post("/experiments/cpu-spike/run", json={"dry_run": True})
+        assert response.status_code == 202
+        wait_finished(client, run_id(response))
+
+    def test_other_experiments_are_not_gated(self, client, clock):
+        clock["now"] = dt.datetime(2026, 11, 3, 12, 0, tzinfo=dt.timezone.utc)
+        response = client.post("/experiments/other/run")
+        assert response.status_code == 202
+        wait_finished(client, run_id(response))

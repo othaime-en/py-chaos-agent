@@ -371,3 +371,120 @@ class TestLoadConfig:
         assert "cpu-recovery" in config.experiments
         for name, exp in config.experiments.items():
             assert exp["name"] == name
+
+
+class TestWindows:
+    def windows(self, *allow, **extra):
+        return {"allow": list(allow), **extra}
+
+    def valid(self, windows):
+        out = validate_config_dict(doc(experiment(windows=windows)))
+        return out["experiments"][0]["windows"]
+
+    def test_windows_are_optional_and_off_by_default(self):
+        out = validate_config_dict(doc(experiment()))["experiments"][0]
+        assert out["windows"] is None
+
+    def test_defaults_are_utc_and_every_day(self):
+        out = self.valid(self.windows({"start": "10:00", "end": "16:00"}))
+        assert out["timezone"] == "UTC"
+        assert out["allow"][0]["days"] == [
+            "mon",
+            "tue",
+            "wed",
+            "thu",
+            "fri",
+            "sat",
+            "sun",
+        ]
+
+    def test_a_full_window(self):
+        out = self.valid(
+            self.windows(
+                {"days": ["mon", "fri"], "start": "09:30", "end": "24:00"},
+                timezone="Africa/Dar_es_Salaam",
+            )
+        )
+        assert out["timezone"] == "Africa/Dar_es_Salaam"
+        assert out["allow"][0] == {
+            "days": ["mon", "fri"],
+            "start": "09:30",
+            "end": "24:00",
+        }
+
+    def test_a_window_past_midnight_is_fine(self):
+        self.valid(self.windows({"start": "22:00", "end": "02:00"}))
+
+    @pytest.mark.parametrize(
+        "field, value",
+        [
+            ("start", "9:00"),
+            ("start", "24:00"),
+            ("start", "25:00"),
+            ("start", "10:60"),
+            ("start", "10:00:00"),
+            ("start", ""),
+            ("end", "24:01"),
+            ("end", "10"),
+            ("end", "noon"),
+        ],
+    )
+    def test_bad_times(self, field, value):
+        window = {"start": "10:00", "end": "16:00", field: value}
+        raw = doc(experiment(windows=self.windows(window)))
+        assert f"experiments.0.windows.allow.0.{field}" in paths(raw)
+
+    def test_start_and_end_must_differ(self):
+        raw = doc(experiment(windows=self.windows({"start": "10:00", "end": "10:00"})))
+        assert "must differ" in str(errors_for(raw))
+
+    @pytest.mark.parametrize(
+        "days", [[], ["Mon"], ["monday"], ["mon", "mon"], ["mon", 1]]
+    )
+    def test_bad_days(self, days):
+        raw = doc(
+            experiment(
+                windows=self.windows({"days": days, "start": "10:00", "end": "11:00"})
+            )
+        )
+        assert "experiments.0.windows.allow.0.days" in {
+            ".".join(str(p) for p in e["loc"][:6]) for e in errors_for(raw).errors
+        }
+
+    @pytest.mark.parametrize(
+        "zone", ["Mars/Base", "utc+3", "../etc/passwd", "", "x" * 65, "Europe"]
+    )
+    def test_bad_timezones(self, zone):
+        raw = doc(
+            experiment(
+                windows=self.windows({"start": "10:00", "end": "11:00"}, timezone=zone)
+            )
+        )
+        assert "experiments.0.windows.timezone" in paths(raw)
+
+    def test_the_timezone_error_says_what_to_use(self):
+        raw = doc(
+            experiment(
+                windows=self.windows(
+                    {"start": "10:00", "end": "11:00"}, timezone="Mars/Base"
+                )
+            )
+        )
+        assert "IANA name" in str(errors_for(raw))
+
+    def test_at_least_one_window(self):
+        assert "experiments.0.windows.allow" in paths(
+            doc(experiment(windows={"allow": []}))
+        )
+        assert "experiments.0.windows.allow" in paths(doc(experiment(windows={})))
+
+    def test_too_many_windows(self):
+        many = [{"start": "10:00", "end": "11:00"}] * (limits.MAX_TIME_WINDOWS + 1)
+        assert "experiments.0.windows.allow" in paths(
+            doc(experiment(windows={"allow": many}))
+        )
+
+    def test_unknown_keys(self):
+        window = {"start": "10:00", "end": "11:00", "weekday": "mon"}
+        raw = doc(experiment(windows=self.windows(window)))
+        assert "experiments.0.windows.allow.0.weekday" in paths(raw)

@@ -509,3 +509,192 @@ def test_make_experiment_is_a_valid_schema_document(target):
     """Guards the helper: the sped-up values are the only deviation from the schema."""
     exp = make_experiment(target)
     assert copy.deepcopy(exp)["faults"]["cpu"]["enabled"] is True
+
+
+# ---------------------------------------------------------------------------
+# Time windows
+# ---------------------------------------------------------------------------
+
+import datetime as dt  # noqa: E402
+
+from src.experiments import OutsideWindow, chaos_budget_seconds  # noqa: E402
+
+UTC = dt.timezone.utc
+
+
+class FakeClock:
+    def __init__(self, text):
+        self.now = dt.datetime.strptime(text, "%Y-%m-%d %H:%M").replace(tzinfo=UTC)
+
+    def __call__(self):
+        return self.now
+
+    def set(self, text):
+        self.now = dt.datetime.strptime(text, "%Y-%m-%d %H:%M").replace(tzinfo=UTC)
+
+
+# Monday 2026-11-02.
+MON_10_TO_16 = {
+    "timezone": "UTC",
+    "allow": [{"days": ["mon"], "start": "10:00", "end": "16:00"}],
+}
+
+
+def windowed(target, **overrides):
+    return make_experiment(target, windows=MON_10_TO_16, **overrides)
+
+
+class TestChaosBudget:
+    def exp(self, **schedule):
+        return {
+            "schedule": {
+                "duration_seconds": 60,
+                "interval_seconds": 10,
+                "max_injections": None,
+                **schedule,
+            },
+            "faults": {"cpu": {"duration_seconds": 20}, "process": {}},
+        }
+
+    def test_duration_plus_the_longest_fault(self):
+        assert chaos_budget_seconds(self.exp()) == 80
+
+    def test_a_cap_ends_the_schedule_earlier(self):
+        # The third and last injection starts at t=20.
+        assert chaos_budget_seconds(self.exp(max_injections=3)) == 40
+
+    def test_a_cap_never_extends_the_schedule(self):
+        assert chaos_budget_seconds(self.exp(max_injections=100)) == 80
+
+    def test_one_injection_starts_at_once(self):
+        assert chaos_budget_seconds(self.exp(max_injections=1)) == 20
+
+    def test_faults_without_a_duration_count_as_instant(self):
+        exp = {"schedule": self.exp()["schedule"], "faults": {"process": {}}}
+        assert chaos_budget_seconds(exp) == 60
+
+
+class TestWindowGate:
+    def test_inside_the_window_it_runs(self, runners, target):
+        runner = runners(injector=Injector(), clock=FakeClock("2026-11-02 12:00"))
+        result = run_to_end(runner, windowed(target))
+        assert result["status"] == "completed"
+        assert result["window_closes_at"] == "2026-11-02T16:00:00.000Z".replace(
+            ".000", ""
+        )
+
+    def test_outside_the_window_it_is_refused_before_anything_starts(
+        self, runners, target
+    ):
+        inj = Injector()
+        runner = runners(injector=inj, clock=FakeClock("2026-11-02 09:00"))
+        with pytest.raises(OutsideWindow, match="opens Mon 2026-11-02 10:00 \\(UTC\\)"):
+            runner.start(windowed(target))
+        assert runner.history() == [], "a refused start must not leave a run behind"
+        assert not runner.is_running
+        assert inj.calls == [] and target.hits == 0, "nothing may even be probed"
+
+    def test_the_window_end_is_exclusive(self, runners, target):
+        runner = runners(injector=Injector(), clock=FakeClock("2026-11-02 16:00"))
+        with pytest.raises(OutsideWindow):
+            runner.start(windowed(target))
+
+    def test_the_wrong_day(self, runners, target):
+        runner = runners(
+            injector=Injector(), clock=FakeClock("2026-11-03 12:00")
+        )  # Tuesday
+        with pytest.raises(OutsideWindow, match="2026-11-09 10:00"):
+            runner.start(windowed(target))
+
+    def test_it_is_refused_when_the_chaos_would_outlast_the_window(
+        self, runners, target
+    ):
+        runner = runners(injector=Injector(), clock=FakeClock("2026-11-02 15:59"))
+        exp = windowed(target, schedule={"duration_seconds": 120})
+        with pytest.raises(OutsideWindow, match="Not enough time left") as exc:
+            runner.start(exp)
+        assert "closes Mon 2026-11-02 16:00 (UTC), in 60s" in str(exc.value)
+        assert "up to 125s" in str(exc.value)  # 120s of schedule + the 5s fault
+
+    def test_it_runs_when_the_chaos_fits_in_the_time_left(self, runners, target):
+        # Needs 0.3 + 5 = 5.3s and 60s are left.
+        clock = FakeClock("2026-11-02 15:59")
+        runner = runners(injector=Injector(), clock=clock)
+        result = run_to_end(runner, windowed(target))
+        assert result["status"] == "completed"
+
+    def test_a_dry_run_ignores_the_windows(self, runners, target):
+        inj = Injector()
+        runner = runners(injector=inj, clock=FakeClock("2026-11-07 03:00"))
+        result = run_to_end(runner, windowed(target), dry_run=True)
+        assert result["status"] == "completed"
+        assert result["window_closes_at"] is None
+        assert inj.calls
+
+    def test_an_experiment_that_is_dry_run_in_config_ignores_them_too(
+        self, runners, target
+    ):
+        runner = runners(injector=Injector(), clock=FakeClock("2026-11-07 03:00"))
+        result = run_to_end(runner, windowed(target, dry_run=True))
+        assert result["status"] == "completed"
+
+    def test_no_windows_means_no_gate(self, runners, target):
+        runner = runners(injector=Injector(), clock=FakeClock("2026-11-07 03:00"))
+        assert run_to_end(runner, make_experiment(target))["status"] == "completed"
+
+    def test_busy_is_reported_before_the_window(self, runners, target):
+        inj = Injector()
+        inj.hold_seconds = 30
+        clock = FakeClock("2026-11-02 12:00")
+        runner = runners(injector=inj, clock=clock)
+        runner.start(windowed(target, schedule={"duration_seconds": 60}))
+        clock.set("2026-11-02 20:00")
+        with pytest.raises(ExperimentBusy):
+            runner.start(windowed(target))
+
+
+class TestWindowClosesDuringARun:
+    def test_the_run_is_aborted_and_its_effects_removed(self, runners, target):
+        inj = Injector()
+        inj.hold_seconds = 30
+        clock = FakeClock("2026-11-02 12:00")
+        runner = runners(injector=inj, clock=clock)
+        run = runner.start(
+            windowed(target, schedule={"duration_seconds": 60, "interval_seconds": 1})
+        )
+        assert wait_for(lambda: lifecycle.is_active("cpu"))
+        clock.set("2026-11-02 16:00")
+        result = finished(runner, run["id"])
+        assert result["status"] == "aborted"
+        assert result["verdict"] == "inconclusive"
+        assert result["reason"] == "the allowed time window closed"
+        assert inj.cut_short == ["cpu"], "the injection outlived its window"
+        assert lifecycle.active_types() == []
+        assert (
+            result["recovery"]["rounds"] == 1
+        ), "no waiting for recovery after an abort"
+
+    def test_a_window_that_closed_during_the_baseline_refuses_the_run(
+        self, runners, target
+    ):
+        target.status = 503
+        inj = Injector()
+        clock = FakeClock("2026-11-02 12:00")
+        runner = runners(injector=inj, clock=clock)
+        exp = windowed(target, steady_state={"baseline_timeout_seconds": 60})
+        run = runner.start(exp)
+        assert wait_for(lambda: runner.get(run["id"])["status"] == "checking_baseline")
+        clock.set("2026-11-02 16:30")
+        target.status = 200  # the baseline now passes, but too late
+        result = finished(runner, run["id"], timeout=5)
+        assert result["status"] == "refused"
+        assert "window closed before the chaos could start" in result["reason"]
+        assert inj.calls == []
+
+    def test_the_window_is_not_checked_on_every_run_forever(self, runners, target):
+        """A run that finishes inside its window is unaffected by later closing."""
+        clock = FakeClock("2026-11-02 12:00")
+        runner = runners(injector=Injector(), clock=clock)
+        result = run_to_end(runner, windowed(target))
+        clock.set("2026-11-02 18:00")
+        assert runner.get(result["id"])["status"] == "completed"
