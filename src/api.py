@@ -19,7 +19,8 @@ from .auth import auth_disabled, get_expected_token, require_auth
 from . import limits
 from .config import Config, load_config, validate_config
 from .engine import ChaosEngine, Settings, run_injection, snapshot_settings
-from .experiments import ExperimentBusy, ExperimentRunner
+from . import windows as time_windows
+from .experiments import ExperimentBusy, ExperimentRunner, OutsideWindow
 from .failures.network import reconcile_stale_rules
 from .lifecycle import lifecycle
 from .resources import apply_settings_and_report, governor
@@ -660,6 +661,16 @@ async def abort_injections():
 # ============================================================================
 
 
+def _window_state(exp: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Whether the experiment's time window is open right now, or ``None`` when
+    it has no windows (always allowed)."""
+    spec = exp.get("windows")
+    if not spec:
+        return None
+    status = time_windows.evaluate(spec, time_windows.utcnow())
+    return {"timezone": spec["timezone"], **status.to_dict()}
+
+
 def _experiment_summary(exp: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "name": exp["name"],
@@ -668,6 +679,7 @@ def _experiment_summary(exp: Dict[str, Any]) -> Dict[str, Any]:
         "faults": sorted(exp["faults"]),
         "duration_seconds": exp["schedule"]["duration_seconds"],
         "dry_run": exp["dry_run"],
+        "window": _window_state(exp),
     }
 
 
@@ -689,8 +701,12 @@ async def list_experiments():
 
 @app.get("/experiments/{name}", tags=["Experiments"])
 async def get_experiment(name: str):
-    """One experiment in full: hypothesis, steady state, faults and schedule."""
-    return _find_experiment(name)
+    """
+    One experiment in full: hypothesis, steady state, faults, schedule and time
+    windows, plus whether its window is open right now (``window_status``).
+    """
+    exp = _find_experiment(name)
+    return {**exp, "window_status": _window_state(exp)}
 
 
 @app.post("/experiments/{name}/run", status_code=202, tags=["Experiments"])
@@ -704,7 +720,9 @@ async def run_experiment(
     ``GET /experiment-runs/{id}`` for the outcome.
 
     Refused with 409 while the agent loop, another experiment, or a manual
-    injection is running, and while the kill switch is holding chaos back. Faults
+    injection is running, while the kill switch is holding chaos back, and
+    outside the experiment's allowed time windows (or when its chaos would not
+    finish before the window closes). Dry runs ignore the windows. Faults
     that do not fit the resource budget are refused with 422, like a manual
     injection.
     """
@@ -770,7 +788,7 @@ async def run_experiment(
             role=who.role if who else None,
             dry_run=dry_run,
         )
-    except ExperimentBusy as e:
+    except (ExperimentBusy, OutsideWindow) as e:
         raise HTTPException(status_code=409, detail=str(e))
 
     logger.info(
