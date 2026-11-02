@@ -63,12 +63,18 @@ READ = [
     ("get", "/config", None),
     ("get", "/config/failures/cpu", None),
     ("get", "/metrics/summary", None),
+    ("get", "/experiments", None),
+    ("get", "/experiments/cpu-spike", None),
+    ("get", "/experiment-runs", None),
+    ("get", "/experiment-runs/abc", None),
 ]
 OPERATE = [
     ("post", "/agent/stop", None),
     ("post", "/agent/restart", None),
     ("post", "/inject/abort", None),
     ("post", "/inject/manual", {"failure_type": "cpu", "dry_run": True}),
+    ("post", "/experiments/cpu-spike/run", None),
+    ("post", "/experiment-runs/abort", None),
 ]
 ADMIN_ONLY = [
     ("patch", "/config", {"dry_run": True}),

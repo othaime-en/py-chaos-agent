@@ -12,6 +12,9 @@ agent:
 
 failures:
   # Individual failure type configurations
+
+experiments:
+  # Optional. Named experiments, run through the API (see the Experiments guide)
 ```
 
 ## Validation and Limits

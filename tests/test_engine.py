@@ -296,6 +296,135 @@ class TestStartAndStop:
         assert e.start_time is not None
 
 
+class TestInjectionCap:
+    def test_the_loop_ends_by_itself_at_the_cap(self, engines):
+        rec = Recorder()
+        e = engines(
+            lambda: settings(interval=0.02, cpu=True), injector=rec, max_injections=3
+        )
+        e.start()
+        assert wait_for(lambda: not e.is_running)
+        assert wait_for(lambda: len(rec.calls) == 3)
+        assert e.exhausted
+        assert e.injections_started == 3
+        time.sleep(0.1)
+        assert len(rec.calls) == 3, "the engine kept injecting past its cap"
+
+    def test_the_cap_applies_inside_one_tick(self, engines):
+        """Three types fire in one tick, but only two may start."""
+        rec = Recorder()
+        e = engines(lambda: None, injector=rec, max_injections=2)
+        result = e.run_tick(settings(cpu=True, memory=True, network=True), 1)
+        assert result.started == 2
+        assert wait_for(lambda: len(rec.calls) == 2)
+        assert e.exhausted
+
+    def test_dry_runs_count_towards_the_cap(self, engines):
+        rec = Recorder()
+        e = engines(lambda: None, injector=rec, max_injections=1)
+        e.run_tick(settings(dry_run=True, cpu=True), 1)
+        assert e.exhausted
+
+    def test_no_cap_means_no_limit(self, engines):
+        rec = Recorder()
+        e = engines(lambda: None, injector=rec)
+        for n in range(1, 6):
+            e.run_tick(settings(dry_run=True, cpu=True), n)
+        assert not e.exhausted
+        assert e.injections_started == 5
+
+    def test_start_resets_the_count(self, engines):
+        rec = Recorder()
+        e = engines(
+            lambda: settings(interval=0.02, cpu=True), injector=rec, max_injections=1
+        )
+        e.start()
+        assert wait_for(lambda: not e.is_running)
+        e.start()
+        assert wait_for(lambda: not e.is_running)
+        assert wait_for(lambda: len(rec.calls) == 2)
+
+
+class TestGracefulStop:
+    def test_stop_without_abort_lets_an_injection_finish(self, engines):
+        released = threading.Event()
+        aborted = []
+
+        def injector(name, cfg, dry_run):
+            with lifecycle.injection(name) as ticket:
+                if ticket is None:
+                    return
+                if ticket.sleep(10):  # True: cut short by an abort
+                    aborted.append(name)
+                released.set()
+
+        e = engines(
+            lambda: settings(interval=0.02, cpu=True),
+            injector=injector,
+            max_injections=1,
+        )
+        e.start()
+        assert wait_for(lambda: lifecycle.is_active("cpu"))
+        assert e.stop(timeout=0.2, abort_running=False) is False
+        assert lifecycle.is_active("cpu"), "a graceful stop aborted the injection"
+        assert not aborted
+        e.stop(timeout=5)  # now abort it so the test can finish
+        assert released.wait(5)
+        assert aborted == ["cpu"]
+
+    def test_default_stop_still_aborts(self, engines):
+        aborted = []
+
+        def injector(name, cfg, dry_run):
+            with lifecycle.injection(name) as ticket:
+                if ticket is not None and ticket.sleep(10):
+                    aborted.append(name)
+
+        e = engines(lambda: settings(interval=0.02, cpu=True), injector=injector)
+        e.start()
+        assert wait_for(lambda: lifecycle.is_active("cpu"))
+        assert e.stop(timeout=5)
+        assert aborted == ["cpu"]
+
+
+class TestAuditContext:
+    def test_context_overrides_the_scheduler_identity(self, engines):
+        from src.audit import audit
+
+        rec = Recorder()
+        e = engines(
+            lambda: None,
+            injector=rec,
+            audit_context={
+                "principal": "carol",
+                "role": "operator",
+                "source": "experiment",
+                "experiment": "cpu-spike",
+                "run_id": "r1",
+            },
+        )
+        e.run_tick(settings(cpu=True), 1)
+        assert wait_for(lambda: audit.recent(event="injection.completed"))
+        for event in ("injection.started", "injection.completed"):
+            entry = audit.recent(event=event)[0]
+            assert entry["principal"] == "carol"
+            assert entry["role"] == "operator"
+            assert entry["source"] == "experiment"
+            assert entry["experiment"] == "cpu-spike"
+            assert entry["run_id"] == "r1"
+
+    def test_without_context_it_is_still_the_scheduler(self, engines):
+        from src.audit import audit
+
+        e = engines(lambda: None, injector=Recorder())
+        e.run_tick(settings(cpu=True), 1)
+        assert wait_for(lambda: audit.recent(event="injection.completed"))
+        entry = audit.recent(event="injection.completed")[0]
+        assert entry["principal"] == "scheduler"
+        assert entry["source"] == "scheduler"
+        assert "experiment" not in entry
+
+
 class TestBadConfig:
     def test_a_missing_config_is_retried_not_fatal(self, engines):
         state = {"ready": False}

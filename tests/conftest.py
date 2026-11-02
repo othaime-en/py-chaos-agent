@@ -4,7 +4,12 @@ import pytest
 import logging
 from src import auth
 from src.audit import audit
-from src.metrics import INJECTIONS_CLAMPED, INJECTIONS_TOTAL, INJECTION_ACTIVE
+from src.metrics import (
+    EXPERIMENTS_TOTAL,
+    INJECTIONS_CLAMPED,
+    INJECTIONS_TOTAL,
+    INJECTION_ACTIVE,
+)
 from src.lifecycle import lifecycle
 from src.resources import CgroupInfo, governor
 
@@ -22,6 +27,7 @@ def reset_metrics():
     INJECTIONS_TOTAL.clear()
     INJECTION_ACTIVE.clear()
     INJECTIONS_CLAMPED.clear()
+    EXPERIMENTS_TOTAL.clear()
     governor.reset()
     lifecycle.reset()
     auth.reset_throttle()
@@ -47,6 +53,7 @@ def reset_metrics():
     INJECTIONS_TOTAL.clear()
     INJECTION_ACTIVE.clear()
     INJECTIONS_CLAMPED.clear()
+    EXPERIMENTS_TOTAL.clear()
     governor.reset()
     lifecycle.reset()
     auth.reset_throttle()

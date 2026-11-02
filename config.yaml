@@ -143,6 +143,32 @@ failures:
     delay_ms: 100      # Latency to add (in milliseconds)
     duration_seconds: 15
 
+# Experiments: named runs with a hypothesis, a steady state and a verdict.
+# Optional, and separate from the continuous loop above. Nothing here runs until
+# you call POST /experiments/<name>/run. See docs/user-guide/experiments.md.
+experiments:
+  - name: cpu-recovery
+    description: Saturate two cores for a short burst.
+    hypothesis: >
+      After two cores are saturated for 20 seconds, the service answers /health
+      again within 60 seconds.
+    steady_state:
+      checks:
+        - name: health
+          url: "http://localhost:8080/health"
+          max_latency_ms: 500
+      required_consecutive_successes: 3
+      baseline_timeout_seconds: 30
+      recovery_timeout_seconds: 60
+    faults:
+      cpu:
+        cores: 2
+        duration_seconds: 20
+    schedule:
+      duration_seconds: 60
+      interval_seconds: 15
+      max_injections: 3
+
 # Example configurations for different environments:
 
 # Development:

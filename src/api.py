@@ -19,6 +19,7 @@ from .auth import auth_disabled, get_expected_token, require_auth
 from . import limits
 from .config import Config, load_config, validate_config
 from .engine import ChaosEngine, Settings, run_injection, snapshot_settings
+from .experiments import ExperimentBusy, ExperimentRunner
 from .failures.network import reconcile_stale_rules
 from .lifecycle import lifecycle
 from .resources import apply_settings_and_report, governor
@@ -54,6 +55,8 @@ class AgentState:
     # True only if the loop was started with the kill switch explicitly turned
     # off (and the config allows that). Defaults to protected.
     kill_switch_bypass: bool = False
+    # Runs named experiments. Created below, once the kill switch lookup exists.
+    experiments: ExperimentRunner
 
 
 agent_state = AgentState()
@@ -67,8 +70,13 @@ def get_config() -> Config:
 
 
 def _chaos_armed() -> bool:
-    """Chaos is active while the loop runs or any injection is in flight."""
-    return agent_state.enabled or bool(lifecycle.active_types())
+    """Chaos is active while the loop or an experiment runs, or any injection is
+    in flight."""
+    return (
+        agent_state.enabled
+        or agent_state.experiments.is_running
+        or bool(lifecycle.active_types())
+    )
 
 
 def _on_kill_switch_trip() -> None:
@@ -128,6 +136,11 @@ agent_state.engine = ChaosEngine(
     on_exit=_on_engine_exit,
     name="chaos-api",
 )
+
+
+# Experiments are gated by the same kill switch as everything else. It is looked
+# up on every use, so a kill switch created or swapped later is honored.
+agent_state.experiments = ExperimentRunner(kill_switch_provider=_active_kill_switch)
 
 
 def _begin_agent_loop() -> None:
@@ -198,6 +211,7 @@ async def lifespan(app: FastAPI):
     if agent_state.enabled:
         logger.info("Shutting down agent on API shutdown")
     lifecycle.shutdown("api shutdown")
+    agent_state.experiments.stop(timeout=10, reason="agent shutting down")
     agent_state.engine.stop(timeout=5, reason="api shutdown")
     if agent_state.kill_switch is not None:
         agent_state.kill_switch.stop_monitoring()
@@ -246,6 +260,15 @@ class AgentStatus(BaseModel):
     enabled_failures: List[str]
     active_injections: List[str] = []
     paused_by_kill_switch: bool = False
+    active_experiment: Optional[str] = None
+
+
+class ExperimentRunRequest(BaseModel):
+    """``dry_run`` overrides the experiment's own setting when given."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    dry_run: Optional[bool] = Field(None, strict=True)
 
 
 class ManualInjectionRequest(BaseModel):
@@ -328,6 +351,7 @@ async def get_status():
 
     enabled_failures = [name for name, cfg in config.failures.items() if cfg["enabled"]]
     ks = _active_kill_switch()
+    current = agent_state.experiments.current()
 
     return AgentStatus(
         enabled=agent_state.enabled,
@@ -338,6 +362,7 @@ async def get_status():
         enabled_failures=enabled_failures,
         active_injections=lifecycle.active_types(),
         paused_by_kill_switch=bool(ks and ks.paused),
+        active_experiment=(current or {}).get("experiment"),
     )
 
 
@@ -356,6 +381,15 @@ async def start_agent(http_request: Request, enable_kill_switch: Optional[bool] 
 
     if agent_state.config is None:
         raise HTTPException(status_code=500, detail="Configuration not loaded")
+
+    if agent_state.experiments.is_running:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "An experiment is running; the agent loop cannot start until it "
+                "ends (POST /experiment-runs/abort to end it)"
+            ),
+        )
 
     config = agent_state.config
     logger.info("Starting chaos agent via API")
@@ -528,6 +562,15 @@ async def manual_injection(
         if not allowed:
             raise HTTPException(status_code=409, detail=f"Chaos paused: {reason}")
 
+    if not request.dry_run and agent_state.experiments.is_running:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "An experiment is running; manual injections would muddy its "
+                "result (POST /experiment-runs/abort to end it)"
+            ),
+        )
+
     if not request.dry_run and lifecycle.is_active(failure_type):
         raise HTTPException(
             status_code=409,
@@ -610,6 +653,169 @@ async def abort_injections():
     """
     aborted = lifecycle.abort_active("aborted via API")
     return {"status": "aborted", "aborted": aborted}
+
+
+# ============================================================================
+# Experiments
+# ============================================================================
+
+
+def _experiment_summary(exp: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "name": exp["name"],
+        "description": exp["description"],
+        "hypothesis": exp["hypothesis"],
+        "faults": sorted(exp["faults"]),
+        "duration_seconds": exp["schedule"]["duration_seconds"],
+        "dry_run": exp["dry_run"],
+    }
+
+
+def _find_experiment(name: str) -> Dict[str, Any]:
+    config = get_config()
+    exp = config.experiments.get(name)
+    if exp is None:
+        raise HTTPException(status_code=404, detail=f"Experiment '{name}' not found")
+    return exp
+
+
+@app.get("/experiments", tags=["Experiments"])
+async def list_experiments():
+    """The experiments defined in the config file."""
+    config = get_config()
+    experiments = [_experiment_summary(e) for e in config.experiments.values()]
+    return {"count": len(experiments), "experiments": experiments}
+
+
+@app.get("/experiments/{name}", tags=["Experiments"])
+async def get_experiment(name: str):
+    """One experiment in full: hypothesis, steady state, faults and schedule."""
+    return _find_experiment(name)
+
+
+@app.post("/experiments/{name}/run", status_code=202, tags=["Experiments"])
+async def run_experiment(
+    name: str,
+    http_request: Request,
+    request: Optional[ExperimentRunRequest] = None,
+):
+    """
+    Start an experiment. Returns at once with the new run; poll
+    ``GET /experiment-runs/{id}`` for the outcome.
+
+    Refused with 409 while the agent loop, another experiment, or a manual
+    injection is running, and while the kill switch is holding chaos back. Faults
+    that do not fit the resource budget are refused with 422, like a manual
+    injection.
+    """
+    exp = _find_experiment(name)
+    dry_run = request.dry_run if request else None
+    effective_dry_run = exp["dry_run"] if dry_run is None else dry_run
+    annotate(http_request, experiment=name, dry_run=effective_dry_run)
+
+    if not effective_dry_run and lifecycle.is_shutting_down():
+        raise HTTPException(status_code=503, detail="Agent is shutting down")
+
+    if agent_state.enabled:
+        raise HTTPException(
+            status_code=409,
+            detail="The agent loop is running; stop it before running an experiment",
+        )
+    if not effective_dry_run and lifecycle.active_types():
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "An injection is running ("
+                + ", ".join(lifecycle.active_types())
+                + "); wait for it to end or abort it first"
+            ),
+        )
+
+    ks = _active_kill_switch()
+    if ks is not None and not effective_dry_run:
+        allowed, reason = ks.allows_injection()
+        if not allowed:
+            raise HTTPException(status_code=409, detail=f"Chaos paused: {reason}")
+
+    # Same pre-flight as a manual injection: an unsafe fault fails here with a
+    # clear reason instead of silently inside the run.
+    problems: List[Dict[str, Any]] = []
+    clamped: Dict[str, int] = {}
+    for fault, cfg in exp["faults"].items():
+        if not cfg["enabled"]:
+            continue
+        if fault == "cpu":
+            grant, field = governor.preview_cores(cfg["cores"]), "cores"
+        elif fault == "memory":
+            grant, field = governor.preview_memory(cfg["mb"]), "mb"
+        else:
+            continue
+        if not grant.ok:
+            problems.append(
+                {
+                    "loc": ["experiments", name, "faults", fault, field],
+                    "msg": grant.reason,
+                }
+            )
+        elif grant.clamped:
+            clamped[f"{fault}.{field}"] = grant.granted
+    if problems and not effective_dry_run:
+        raise HTTPException(status_code=422, detail=problems)
+
+    who = getattr(http_request.state, "principal", None)
+    try:
+        run = agent_state.experiments.start(
+            exp,
+            principal=who.name if who else "unknown",
+            role=who.role if who else None,
+            dry_run=dry_run,
+        )
+    except ExperimentBusy as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+    logger.info(
+        "Experiment requested via API",
+        extra={"experiment": name, "run_id": run["id"], "dry_run": effective_dry_run},
+    )
+    response: Dict[str, Any] = {
+        "status": "started",
+        "message": f"Experiment '{name}' started",
+        "run": run,
+    }
+    if clamped:
+        response["clamped"] = clamped
+    return response
+
+
+@app.get("/experiment-runs", tags=["Experiments"])
+async def list_experiment_runs(limit: int = Query(20, ge=1, le=50)):
+    """Recent experiment runs, newest first (the last 50 are remembered)."""
+    runs = agent_state.experiments.history(limit=limit)
+    return {"count": len(runs), "runs": runs}
+
+
+@app.post("/experiment-runs/abort", tags=["Experiments"])
+async def abort_experiment(http_request: Request):
+    """
+    End the running experiment now. Its injections are cut short and their
+    effects removed. The run finishes as ``aborted`` with an inconclusive verdict.
+    """
+    who = getattr(http_request.state, "principal", None)
+    name = who.name if who else "unknown"
+    current = agent_state.experiments.current()
+    if current is None or not agent_state.experiments.abort(f"aborted by {name}"):
+        raise HTTPException(status_code=400, detail="No experiment is running")
+    annotate(http_request, experiment=current["experiment"], run_id=current["id"])
+    return {"status": "aborting", "run": current}
+
+
+@app.get("/experiment-runs/{run_id}", tags=["Experiments"])
+async def get_experiment_run(run_id: str):
+    """One run: its status, verdict, and the steady-state results around the chaos."""
+    run = agent_state.experiments.get(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
+    return run
 
 
 # ============================================================================

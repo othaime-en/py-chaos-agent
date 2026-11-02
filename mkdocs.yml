@@ -63,6 +63,7 @@ nav:
       - Terraform (AWS EKS): user-guide/terraform.md
       - API Security: user-guide/api-security.md
       - Blast Radius: user-guide/blast-radius.md
+      - Experiments: user-guide/experiments.md
       - Process Targeting: user-guide/process-targeting.md
       - Kill Switch: user-guide/kill-switch.md
       - Shutdown and Cleanup: user-guide/shutdown-and-cleanup.md

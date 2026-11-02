@@ -63,6 +63,18 @@ AUDIT_WRITE_FAILURES_TOTAL = Counter(
     "Audit events that could not be written to the audit log file",
 )
 
+EXPERIMENTS_TOTAL = Counter(
+    "chaos_experiments_total",
+    "Experiments that have finished",
+    # status: completed, aborted, refused (the target was not healthy to begin
+    # with) or error. verdict: confirmed, falsified or inconclusive.
+    ["status", "verdict"],
+)
+
+EXPERIMENT_ACTIVE = Gauge(
+    "chaos_experiment_active", "1 while an experiment is running, otherwise 0"
+)
+
 INJECTION_ACTIVE = Gauge(
     "chaos_injection_active", "Currently active chaos injection", ["failure_type"]
 )
@@ -140,5 +152,10 @@ def metric_value(collector: Any, **labels: str) -> float:
 
 def reset_metrics() -> None:
     """Forget every injection series (useful for tests and the reset endpoint)."""
-    for collector in (INJECTIONS_TOTAL, INJECTIONS_CLAMPED, INJECTION_ACTIVE):
+    for collector in (
+        INJECTIONS_TOTAL,
+        INJECTIONS_CLAMPED,
+        INJECTION_ACTIVE,
+        EXPERIMENTS_TOTAL,
+    ):
         collector.clear()
