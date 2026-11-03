@@ -27,6 +27,14 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from pydantic import model_validator
 
 from . import limits
+from .targets import (
+    MAX_SELECTOR_ITEMS,
+    MAX_SELECTOR_VALUES,
+    TargetLabelsError,
+    validate_label_key,
+    validate_label_value,
+    validate_selector,
+)
 from .failures.process import validate_target_name
 
 FAILURE_TYPES = ("cpu", "memory", "process", "network")
@@ -536,6 +544,67 @@ class ExperimentFaults(_StrictModel):
         return self
 
 
+class SelectorExpression(_StrictModel):
+    """``In`` and ``NotIn`` need values; ``Exists`` and ``DoesNotExist`` take none."""
+
+    key: str
+    operator: Literal["In", "NotIn", "Exists", "DoesNotExist"]
+    values: List[str] = Field(default_factory=list, max_length=MAX_SELECTOR_VALUES)
+
+    @field_validator("key")
+    @classmethod
+    def _valid_key(cls, value: str) -> str:
+        return validate_label_key(value)
+
+    @field_validator("values")
+    @classmethod
+    def _valid_values(cls, value: List[str]) -> List[str]:
+        for item in value:
+            validate_label_value(item)
+        return value
+
+    @model_validator(mode="after")
+    def _values_fit_the_operator(self) -> "SelectorExpression":
+        if self.operator in ("In", "NotIn") and not self.values:
+            raise ValueError(f"operator {self.operator} needs at least one value")
+        if self.operator in ("Exists", "DoesNotExist") and self.values:
+            raise ValueError(f"operator {self.operator} takes no values")
+        return self
+
+
+class TargetSelector(_StrictModel):
+    """
+    Where an experiment may run, by the labels of the agent's target.
+
+    Every condition must hold. The experiment is refused on an agent whose labels
+    (``CHAOS_TARGET_LABELS`` / ``CHAOS_TARGET_LABELS_FILE``) do not satisfy it. See
+    ``src.targets`` for the rules.
+    """
+
+    match_labels: Dict[str, str] = Field(
+        default_factory=dict, max_length=MAX_SELECTOR_ITEMS
+    )
+    match_expressions: List[SelectorExpression] = Field(
+        default_factory=list, max_length=MAX_SELECTOR_ITEMS
+    )
+
+    @field_validator("match_labels")
+    @classmethod
+    def _valid_labels(cls, value: Dict[str, str]) -> Dict[str, str]:
+        for key, item in value.items():
+            validate_label_key(key)
+            validate_label_value(item, key)
+        return value
+
+    @model_validator(mode="after")
+    def _not_empty(self) -> "TargetSelector":
+        try:
+            validate_selector(self.model_dump())
+        except TargetLabelsError as e:
+            raise ValueError(str(e)) from None
+        return self
+
+
 def _every_day() -> List[Weekday]:
     return ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 
@@ -604,6 +673,7 @@ class ExperimentConfig(_StrictModel):
     steady_state: SteadyStateConfig
     faults: ExperimentFaults
     schedule: ExperimentSchedule
+    selector: Optional[TargetSelector] = None
     windows: Optional[ExperimentWindows] = None
     dry_run: bool = False
 
