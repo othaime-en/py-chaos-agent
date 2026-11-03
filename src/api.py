@@ -19,8 +19,14 @@ from .auth import auth_disabled, get_expected_token, require_auth
 from . import limits
 from .config import Config, load_config, validate_config
 from .engine import ChaosEngine, Settings, run_injection, snapshot_settings
+from . import targets
 from . import windows as time_windows
-from .experiments import ExperimentBusy, ExperimentRunner, OutsideWindow
+from .experiments import (
+    ExperimentBusy,
+    ExperimentRunner,
+    OutsideWindow,
+    TargetMismatch,
+)
 from .failures.network import reconcile_stale_rules
 from .lifecycle import lifecycle
 from .resources import apply_settings_and_report, governor
@@ -671,6 +677,15 @@ def _window_state(exp: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return {"timezone": spec["timezone"], **status.to_dict()}
 
 
+def _target_state(exp: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Whether this agent is a target of the experiment right now, or ``None``
+    when it has no selector (it runs anywhere)."""
+    selector = exp.get("selector")
+    if not selector:
+        return None
+    return targets.match(selector, agent_state.experiments.target_labels()).to_dict()
+
+
 def _experiment_summary(exp: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "name": exp["name"],
@@ -680,6 +695,7 @@ def _experiment_summary(exp: Dict[str, Any]) -> Dict[str, Any]:
         "duration_seconds": exp["schedule"]["duration_seconds"],
         "dry_run": exp["dry_run"],
         "window": _window_state(exp),
+        "target": _target_state(exp),
     }
 
 
@@ -689,6 +705,20 @@ def _find_experiment(name: str) -> Dict[str, Any]:
     if exp is None:
         raise HTTPException(status_code=404, detail=f"Experiment '{name}' not found")
     return exp
+
+
+@app.get("/target", tags=["Experiments"])
+async def get_target():
+    """
+    The labels this agent has, which experiment selectors are matched against
+    (``CHAOS_TARGET_LABELS`` and ``CHAOS_TARGET_LABELS_FILE``). ``labels_error`` says
+    why they could not be read; in that case the labels are empty and selectors
+    do not match.
+    """
+    return {
+        "labels": agent_state.experiments.target_labels(),
+        "labels_error": targets.agent_labels.error,
+    }
 
 
 @app.get("/experiments", tags=["Experiments"])
@@ -702,11 +732,17 @@ async def list_experiments():
 @app.get("/experiments/{name}", tags=["Experiments"])
 async def get_experiment(name: str):
     """
-    One experiment in full: hypothesis, steady state, faults, schedule and time
-    windows, plus whether its window is open right now (``window_status``).
+    One experiment in full: hypothesis, steady state, faults, schedule, selector
+    and time windows, plus whether its window is open right now
+    (``window_status``) and whether this agent matches its selector
+    (``target_status``).
     """
     exp = _find_experiment(name)
-    return {**exp, "window_status": _window_state(exp)}
+    return {
+        **exp,
+        "window_status": _window_state(exp),
+        "target_status": _target_state(exp),
+    }
 
 
 @app.post("/experiments/{name}/run", status_code=202, tags=["Experiments"])
@@ -720,9 +756,10 @@ async def run_experiment(
     ``GET /experiment-runs/{id}`` for the outcome.
 
     Refused with 409 while the agent loop, another experiment, or a manual
-    injection is running, while the kill switch is holding chaos back, and
-    outside the experiment's allowed time windows (or when its chaos would not
-    finish before the window closes). Dry runs ignore the windows. Faults
+    injection is running, while the kill switch is holding chaos back, when this
+    agent's labels do not match the experiment's selector, and outside the
+    experiment's allowed time windows (or when its chaos would not finish before
+    the window closes). Dry runs ignore the selector and the windows. Faults
     that do not fit the resource budget are refused with 422, like a manual
     injection.
     """
@@ -788,7 +825,7 @@ async def run_experiment(
             role=who.role if who else None,
             dry_run=dry_run,
         )
-    except (ExperimentBusy, OutsideWindow) as e:
+    except (ExperimentBusy, OutsideWindow, TargetMismatch) as e:
         raise HTTPException(status_code=409, detail=str(e))
 
     logger.info(
