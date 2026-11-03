@@ -698,3 +698,189 @@ class TestWindowClosesDuringARun:
         result = run_to_end(runner, windowed(target))
         clock.set("2026-11-02 18:00")
         assert runner.get(result["id"])["status"] == "completed"
+
+
+# ---------------------------------------------------------------------------
+# Target selectors
+# ---------------------------------------------------------------------------
+
+from src import targets  # noqa: E402
+from src.experiments import TargetMismatch  # noqa: E402
+
+STAGING = {"match_labels": {"env": "staging"}}
+
+
+class Labels:
+    """Labels the test can change while an experiment runs."""
+
+    def __init__(self, **labels):
+        self.labels = dict(labels)
+
+    def __call__(self):
+        return dict(self.labels)
+
+
+def selected(target, selector=STAGING, **overrides):
+    return make_experiment(target, selector=selector, **overrides)
+
+
+class TestSelectorGate:
+    def test_a_matching_agent_runs_it(self, runners, target):
+        labels = Labels(env="staging", app="checkout")
+        runner = runners(injector=Injector(), labels_provider=labels)
+        result = run_to_end(runner, selected(target))
+        assert result["status"] == "completed"
+        assert result["target_labels"] == {"env": "staging", "app": "checkout"}
+
+    def test_a_different_agent_is_refused_before_anything_starts(self, runners, target):
+        inj = Injector()
+        runner = runners(injector=inj, labels_provider=Labels(env="prod"))
+        with pytest.raises(TargetMismatch, match="env must be 'staging' but is 'prod'"):
+            runner.start(selected(target))
+        assert runner.history() == [], "a refused start must not leave a run behind"
+        assert inj.calls == [] and target.hits == 0
+
+    def test_an_agent_without_labels_matches_no_selector(self, runners, target):
+        runner = runners(injector=Injector(), labels_provider=Labels())
+        with pytest.raises(
+            TargetMismatch, match="env must be 'staging' but is not set"
+        ):
+            runner.start(selected(target))
+
+    def test_every_unmet_condition_is_reported(self, runners, target):
+        selector = {
+            "match_labels": {"env": "staging"},
+            "match_expressions": [{"key": "chaos-ok", "operator": "Exists"}],
+        }
+        runner = runners(injector=Injector(), labels_provider=Labels(env="prod"))
+        with pytest.raises(TargetMismatch) as exc:
+            runner.start(selected(target, selector))
+        assert "env must be" in str(exc.value) and "chaos-ok must be set" in str(
+            exc.value
+        )
+
+    def test_expressions_are_honoured(self, runners, target):
+        selector = {
+            "match_expressions": [
+                {"key": "tier", "operator": "NotIn", "values": ["prod"]}
+            ]
+        }
+        runner = runners(injector=Injector(), labels_provider=Labels(tier="canary"))
+        assert run_to_end(runner, selected(target, selector))["status"] == "completed"
+        runner = runners(injector=Injector(), labels_provider=Labels(tier="prod"))
+        with pytest.raises(TargetMismatch):
+            runner.start(selected(target, selector))
+
+    def test_no_selector_means_no_gate_and_no_recorded_labels(self, runners, target):
+        runner = runners(injector=Injector(), labels_provider=Labels())
+        result = run_to_end(runner, make_experiment(target))
+        assert result["status"] == "completed"
+        assert result["target_labels"] is None
+
+    def test_a_dry_run_ignores_the_selector(self, runners, target):
+        inj = Injector()
+        runner = runners(injector=inj, labels_provider=Labels(env="prod"))
+        result = run_to_end(runner, selected(target), dry_run=True)
+        assert result["status"] == "completed"
+        assert result["target_labels"] is None
+        assert inj.calls
+
+    def test_the_target_is_checked_before_the_window(self, runners, target):
+        runner = runners(
+            injector=Injector(),
+            labels_provider=Labels(env="prod"),
+            clock=FakeClock("2026-11-07 03:00"),
+        )
+        with pytest.raises(TargetMismatch):
+            runner.start(selected(target, windows=MON_10_TO_16))
+
+    def test_the_default_labels_come_from_the_environment(
+        self, runners, target, monkeypatch
+    ):
+        monkeypatch.setenv("CHAOS_TARGET_LABELS", "env=staging")
+        targets.agent_labels.reset()
+        try:
+            runner = runners(injector=Injector())
+            assert run_to_end(runner, selected(target))["status"] == "completed"
+            monkeypatch.setenv("CHAOS_TARGET_LABELS", "env=prod")
+            targets.agent_labels.reset()
+            with pytest.raises(TargetMismatch):
+                runner.start(selected(target))
+        finally:
+            targets.agent_labels.reset()
+
+    def test_the_labels_are_in_the_audit_log(self, runners, target):
+        runner = runners(injector=Injector(), labels_provider=Labels(env="staging"))
+        run_to_end(runner, selected(target))
+        assert wait_for(lambda: audit.recent(event="experiment.finished"))
+        assert audit.recent(event="experiment.started")[0]["target_labels"] == {
+            "env": "staging"
+        }
+
+
+class TestLabelsChangeDuringARun:
+    def test_removing_the_label_aborts_the_run_and_its_effects(self, runners, target):
+        """The remote off switch: relabel the pod and the chaos stops."""
+        labels = Labels(env="staging")
+        inj = Injector()
+        inj.hold_seconds = 30
+        runner = runners(injector=inj, labels_provider=labels)
+        run = runner.start(
+            selected(target, schedule={"duration_seconds": 60, "interval_seconds": 1})
+        )
+        assert wait_for(lambda: lifecycle.is_active("cpu"))
+        labels.labels.pop("env")
+        result = finished(runner, run["id"])
+        assert result["status"] == "aborted"
+        assert result["verdict"] == "inconclusive"
+        assert "no longer match the selector" in result["reason"]
+        assert "env must be 'staging' but is not set" in result["reason"]
+        assert inj.cut_short == ["cpu"], "the injection outlived its label"
+        assert lifecycle.active_types() == []
+
+    def test_changing_the_label_to_another_value_aborts_too(self, runners, target):
+        labels = Labels(env="staging")
+        inj = Injector()
+        inj.hold_seconds = 30
+        runner = runners(injector=inj, labels_provider=labels)
+        run = runner.start(selected(target, schedule={"duration_seconds": 60}))
+        assert wait_for(lambda: lifecycle.is_active("cpu"))
+        labels.labels["env"] = "prod"
+        assert finished(runner, run["id"])["status"] == "aborted"
+
+    def test_unrelated_label_changes_do_not_matter(self, runners, target):
+        labels = Labels(env="staging")
+        inj = Injector()
+        inj.hold_seconds = 30
+        runner = runners(injector=inj, labels_provider=labels)
+        run = runner.start(selected(target, schedule={"duration_seconds": 60}))
+        assert wait_for(lambda: lifecycle.is_active("cpu"))
+        labels.labels["pod-template-hash"] = "abc"
+        time.sleep(0.4)
+        assert runner.get(run["id"])["status"] == "running"
+        runner.abort()
+        finished(runner, run["id"])
+
+    def test_labels_lost_during_the_baseline_refuse_the_run(self, runners, target):
+        target.status = 503
+        labels = Labels(env="staging")
+        inj = Injector()
+        runner = runners(injector=inj, labels_provider=labels)
+        run = runner.start(
+            selected(target, steady_state={"baseline_timeout_seconds": 60})
+        )
+        assert wait_for(lambda: runner.get(run["id"])["status"] == "checking_baseline")
+        labels.labels.clear()
+        target.status = 200
+        result = finished(runner, run["id"], timeout=5)
+        assert result["status"] == "refused"
+        assert "no longer match the selector" in result["reason"]
+        assert inj.calls == []
+
+    def test_a_dry_run_is_not_aborted_by_label_changes(self, runners, target):
+        labels = Labels(env="staging")
+        inj = Injector()
+        runner = runners(injector=inj, labels_provider=labels)
+        run = runner.start(selected(target), dry_run=True)
+        labels.labels.clear()
+        assert finished(runner, run["id"])["status"] == "completed"
