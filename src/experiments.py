@@ -606,19 +606,28 @@ class ExperimentRunner:
         )
         engine.start()
         try:
-            abort_reason = self._hold(
-                engine, schedule["duration_seconds"], run.dry_run, guard
+            # Keep watching the whole time, including after the schedule ends while
+            # the last injections finish: an abort, the kill switch, a closing
+            # window or a removed label must stop the chaos then too.
+            deadline = time.monotonic() + schedule["duration_seconds"]
+            abort_reason = self._watch(
+                lambda: not engine.is_running or time.monotonic() >= deadline,
+                run.dry_run,
+                guard,
             )
             if abort_reason is None:
+                engine.halt()
                 longest = max(
                     (f.get("duration_seconds", 0) for f in faults.values()), default=0
                 )
-                clean = engine.stop(
-                    timeout=longest + _FINISH_GRACE_SECONDS,
-                    reason="experiment finished",
-                    abort_running=False,
+                drain_deadline = time.monotonic() + longest + _FINISH_GRACE_SECONDS
+                abort_reason = self._watch(
+                    lambda: (not engine.is_running and engine.in_flight() == 0)
+                    or time.monotonic() >= drain_deadline,
+                    run.dry_run,
+                    guard,
                 )
-                if not clean:
+                if abort_reason is None and (engine.is_running or engine.in_flight()):
                     abort_reason = "injections did not finish in time and were aborted"
             if abort_reason is not None:
                 engine.stop(timeout=_ABORT_TIMEOUT_SECONDS, reason=abort_reason)
@@ -629,15 +638,17 @@ class ExperimentRunner:
             self._update(run, injections_started=engine.injections_started)
         return abort_reason
 
-    def _hold(
+    def _watch(
         self,
-        engine: ChaosEngine,
-        duration: float,
+        done: Callable[[], bool],
         dry_run: bool,
         guard: Optional[Callable[[], Optional[str]]] = None,
     ) -> Optional[str]:
-        """Wait until the chaos phase should end. Returns an abort reason or None."""
-        deadline = time.monotonic() + duration
+        """
+        Wait until ``done()``, watching for reasons to stop early. Returns that
+        reason (an abort, shutdown, a guard such as the window or labels, or the
+        kill switch), or ``None`` if ``done()`` came first.
+        """
         while True:
             if self._cancel.is_set():
                 return self._abort_reason
@@ -652,6 +663,6 @@ class ExperimentRunner:
                 allowed, why = ks.allows_injection()
                 if not allowed:
                     return f"stopped by the kill switch: {why}"
-            if not engine.is_running or time.monotonic() >= deadline:
+            if done():
                 return None
             self._cancel.wait(_POLL_SECONDS)

@@ -74,6 +74,8 @@ spec:
     metadata:
       labels:
         app: resilient-app
+        # Experiments can select on pod labels (see docs/user-guide/experiments.md).
+        env: demo
     spec:
       shareProcessNamespace: true
       # Pod-wide defaults. Both containers run as unprivileged users (the images
@@ -129,6 +131,10 @@ spec:
               subPath: config.yaml
             - name: logs
               mountPath: /var/log/chaos-agent
+            # The pod's own labels, for experiment selectors.
+            - name: podinfo
+              mountPath: /etc/podinfo
+              readOnly: true
             # The root filesystem is read-only; /tmp is the only other place
             # the agent may write.
             - name: tmp
@@ -170,6 +176,11 @@ spec:
               value: "0.0.0.0"
             - name: CHAOS_API_TOKEN_FILE
               value: /var/run/secrets/chaos-api/token
+            # The pod's labels (mounted below). An experiment with a selector only
+            # runs while they match, so removing a label stops it:
+            #   kubectl -n chaos-demo label pod <pod> env-
+            - name: CHAOS_TARGET_LABELS_FILE
+              value: /etc/podinfo/labels
             # Metrics listen on loopback unless told otherwise. Prometheus
             # reaches them on the pod IP, which requires a scrape token (a
             # different value from the API token, in the same Secret).
@@ -204,6 +215,12 @@ spec:
             name: chaos-config
         - name: logs
           emptyDir: {}
+        - name: podinfo
+          downwardAPI:
+            items:
+              - path: labels
+                fieldRef:
+                  fieldPath: metadata.labels
         - name: tmp
           emptyDir:
             medium: Memory

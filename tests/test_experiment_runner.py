@@ -153,16 +153,12 @@ class TestVerdicts:
 
     def test_a_target_that_recovers_in_time_confirms_it(self, runners, target):
         inj = Injector()
-
-        def break_then_heal():
-            target.status = 503
-            threading.Timer(0.4, lambda: setattr(target, "status", 200)).start()
-
-        inj.on_call = break_then_heal
+        # After the chaos the target answers 503 twice, then recovers.
+        inj.on_call = lambda: setattr(target, "script", [503, 503])
         exp = make_experiment(target, steady_state={"recovery_timeout_seconds": 10})
         result = run_to_end(runners(injector=inj), exp)
         assert result["verdict"] == "confirmed"
-        assert result["recovery"]["rounds"] >= 2
+        assert result["recovery"]["rounds"] == 3
 
     def test_a_failing_injector_does_not_fail_the_run(self, runners, target):
         inj = Injector()
@@ -884,3 +880,93 @@ class TestLabelsChangeDuringARun:
         run = runner.start(selected(target), dry_run=True)
         labels.labels.clear()
         assert finished(runner, run["id"])["status"] == "completed"
+
+
+# ---------------------------------------------------------------------------
+# The chaos is watched while the last injections finish, too
+# ---------------------------------------------------------------------------
+
+
+class TestDrainIsWatched:
+    """
+    With max_injections the engine stops rolling by itself while a long injection
+    is still running. Everything that can stop an experiment must still work then.
+    """
+
+    CAPPED = {"duration_seconds": 60, "interval_seconds": 1, "max_injections": 1}
+
+    def start_draining(self, runner, inj, exp):
+        inj.hold_seconds = 30
+        run = runner.start(exp)
+        assert wait_for(lambda: lifecycle.is_active("cpu"))
+        time.sleep(0.4)  # the engine has hit its cap and stopped rolling
+        assert runner.get(run["id"])["status"] == "running"
+        return run
+
+    def assert_stopped_quickly(self, runner, inj, run, started):
+        result = finished(runner, run["id"], timeout=8)
+        assert time.monotonic() - started < 8, "waited for the injection to finish"
+        assert result["status"] == "aborted"
+        assert inj.cut_short == ["cpu"], "the injection was left running"
+        assert lifecycle.active_types() == []
+        return result
+
+    def test_an_operator_abort(self, runners, target):
+        inj = Injector()
+        runner = runners(injector=inj)
+        started = time.monotonic()
+        run = self.start_draining(
+            runner, inj, make_experiment(target, schedule=self.CAPPED)
+        )
+        assert runner.abort() is True
+        result = self.assert_stopped_quickly(runner, inj, run, started)
+        assert result["reason"] == "aborted by an operator"
+
+    def test_a_removed_label(self, runners, target):
+        labels = Labels(env="staging")
+        inj = Injector()
+        runner = runners(injector=inj, labels_provider=labels)
+        started = time.monotonic()
+        run = self.start_draining(runner, inj, selected(target, schedule=self.CAPPED))
+        labels.labels.clear()
+        result = self.assert_stopped_quickly(runner, inj, run, started)
+        assert "no longer match the selector" in result["reason"]
+
+    def test_a_closing_window(self, runners, target):
+        clock = FakeClock("2026-11-02 12:00")
+        inj = Injector()
+        runner = runners(injector=inj, clock=clock)
+        started = time.monotonic()
+        run = self.start_draining(runner, inj, windowed(target, schedule=self.CAPPED))
+        clock.set("2026-11-02 16:00")
+        result = self.assert_stopped_quickly(runner, inj, run, started)
+        assert result["reason"] == "the allowed time window closed"
+
+    def test_the_kill_switch(self, runners, target):
+        state = SimpleNamespace(healthy=True)
+        cfg = KillSwitchConfig(
+            health_check_interval_seconds=3600,
+            grace_after_agent_start_seconds=0,
+            recovery_test_interval_seconds=3600,
+            consecutive_failures_threshold=1,
+        )
+        ks = KillSwitch(cfg, is_armed=lambda: True, health_check=lambda: state.healthy)
+        inj = Injector()
+        runner = runners(injector=inj, kill_switch_provider=lambda: ks)
+        started = time.monotonic()
+        run = self.start_draining(
+            runner, inj, make_experiment(target, schedule=self.CAPPED)
+        )
+        state.healthy = False
+        ks._tick()
+        lifecycle.abort_active("kill switch triggered")  # what the API wires up
+        result = self.assert_stopped_quickly(runner, inj, run, started)
+        assert "kill switch" in result["reason"]
+
+    def test_without_trouble_the_injection_finishes_by_itself(self, runners, target):
+        inj = Injector()
+        inj.hold_seconds = 1.0
+        runner = runners(injector=inj)
+        result = run_to_end(runner, make_experiment(target, schedule=self.CAPPED))
+        assert result["status"] == "completed"
+        assert inj.completed == ["cpu"] and inj.cut_short == []

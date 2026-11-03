@@ -89,6 +89,7 @@ after the chaos with each check's outcome and latency.
 | `steady_state` | required | See below. |
 | `faults` | required | One or more of `cpu`, `memory`, `process`, `network`. |
 | `schedule` | required | See below. |
+| `selector` | none | Which agents may run it, by label. See [Target selectors](#target-selectors). Without it, any agent. |
 | `windows` | none | When the experiment may run. See [Time windows](#time-windows). Without it, always. |
 | `dry_run` | `false` | Log what would happen without doing it. The API can override it per run. |
 
@@ -132,6 +133,82 @@ be able to fire.
 | `duration_seconds` | required | 1 to 21600 | How long faults keep being rolled. |
 | `interval_seconds` | 10 | 1 to 3600 | Time between rolls. |
 | `max_injections` | none | 1 to 1000 | Stop after this many injections have started. Dry runs count. |
+
+## Target selectors
+
+The same `config.yaml` is usually shared by many sidecars in many environments. A
+selector says where an experiment may run, and each agent knows its own labels. If
+they do not match, the experiment is refused. An experiment written for staging
+cannot run in production because someone copied the config.
+
+```yaml
+experiments:
+  - name: cpu-recovery
+    # ...
+    selector:
+      match_labels:
+        env: staging
+        app: checkout
+      match_expressions:
+        - key: tier
+          operator: In
+          values: [canary, preview]
+        - key: chaos-optout
+          operator: DoesNotExist
+```
+
+### Giving the agent its labels
+
+| Setting | Meaning |
+| --- | --- |
+| `CHAOS_TARGET_LABELS` | Comma-separated `key=value` pairs, e.g. `env=staging,app=checkout`. |
+| `CHAOS_TARGET_LABELS_FILE` | A file with one `key="value"` per line. This is the exact format Kubernetes writes for the downward API field `metadata.labels`, so a pod's labels can be mounted straight in. |
+
+If both are set the file wins on a clash. `k8s/chaos-demo.yaml` mounts the pod's
+labels this way. `GET /target` shows the labels the agent currently has.
+
+The server refuses to start if either setting is invalid or the file cannot be
+read, rather than failing every selector without saying why.
+
+Label rules are Kubernetes': a key is `name` or `prefix/name`, a name is up to 63
+letters, digits, `-`, `_` or `.` starting and ending with a letter or digit, and a
+prefix is a DNS name. A value is empty or follows the name rule.
+
+### Selector rules
+
+| Field | Meaning |
+| --- | --- |
+| `match_labels` | Every pair must be present with exactly that value. |
+| `match_expressions[].key` | The label to test. |
+| `match_expressions[].operator` | `In`, `NotIn` (need `values`), `Exists`, `DoesNotExist` (take none). |
+
+- Every condition must hold. A selector must have at least one: an empty selector
+  would match every agent, so it is a config error.
+- An agent with no labels matches no selector. `NotIn` and `DoesNotExist` are
+  satisfied by a missing label, as in Kubernetes.
+- At most 20 label conditions, 20 expressions and 20 values per expression.
+
+### What the agent does with them
+
+| When | What happens |
+| --- | --- |
+| You start a run on an agent that does not match | Refused with `409`, listing every unmet condition (for example `env must be 'staging' but is 'prod'`). No run is created and nothing is probed. The target is checked before the time window. |
+| The labels stop matching during the baseline check | The run ends `refused`. Nothing was injected. |
+| The labels stop matching during the chaos | The run is aborted, injections are cut short and their effects removed. Verdict `inconclusive`. |
+| Dry run | The selector does not apply. |
+
+The labels file is re-read about once a second and **fails closed**: if it cannot
+be read or is invalid, the agent has no labels and a running experiment stops,
+rather than carrying on with stale ones. With Kubernetes the downward API file
+follows the pod's labels (with the kubelet's sync delay), so this is a remote off
+switch:
+
+```bash
+kubectl -n chaos-demo label pod <pod> env-     # remove the label, the chaos stops
+```
+
+A run records the labels it started with (`target_labels`) and so does the
+`experiment.started` audit event.
 
 ## Time windows
 
@@ -195,7 +272,8 @@ now and when it closes or next opens (UTC), and a run reports `window_closes_at`
 | Endpoint | Role | |
 | --- | --- | --- |
 | `GET /experiments` | viewer | Summaries of every defined experiment. |
-| `GET /experiments/{name}` | viewer | One experiment in full. |
+| `GET /experiments/{name}` | viewer | One experiment in full, with whether its window is open and whether this agent matches its selector. |
+| `GET /target` | viewer | The labels this agent has, which selectors are matched against. |
 | `POST /experiments/{name}/run` | operator | Start a run. Returns `202` and the run. Optional body `{"dry_run": true}`. |
 | `GET /experiment-runs` | viewer | Recent runs, newest first (the last 50 are kept in memory). |
 | `GET /experiment-runs/{id}` | viewer | One run. |
@@ -213,12 +291,12 @@ changes for the next run; a run in progress keeps the copy it started with.
 | Status | When |
 | --- | --- |
 | `404` | No such experiment. |
-| `409` | The agent loop is running; another experiment is running; an injection is running; the kill switch is holding chaos back; or the experiment is outside its [time windows](#time-windows) (or would not finish before one closes). |
+| `409` | The agent loop is running; another experiment is running; an injection is running; the kill switch is holding chaos back; this agent does not match the experiment's [selector](#target-selectors); or the experiment is outside its [time windows](#time-windows) (or would not finish before one closes). |
 | `422` | A fault does not fit the container's resource budget (same rule as a manual injection), or the body is invalid. |
 | `503` | The agent is shutting down. |
 
-Dry runs skip the injection, kill switch, budget and time window refusals, since
-they change nothing.
+Dry runs skip the injection, kill switch, budget, selector and time window
+refusals, since they change nothing.
 
 While an experiment runs, `POST /agent/start` and non-dry-run `POST /inject/manual`
 return `409`. Two sources of chaos at once would make the result unreadable.
@@ -230,7 +308,8 @@ return `409`. Two sources of chaos at once would make the result unreadable.
 - Stop an experiment with `POST /experiment-runs/abort`, not `POST /agent/stop`
   (that one only stops the agent loop). `POST /inject/abort` cuts running
   injections short, but the experiment keeps rolling its schedule.
-- A closing time window aborts a running experiment the same way.
+- A closing time window, or labels that stop matching the selector, abort a running
+  experiment the same way.
 - Shutdown aborts a running experiment and removes its effects before exiting.
 - Every start and finish is in the audit log (`experiment.started`,
   `experiment.finished`). The injections inside a run are recorded with
