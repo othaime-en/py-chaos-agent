@@ -56,7 +56,9 @@ curl -H "Authorization: Bearer $CHAOS_API_TOKEN" \
    immediate) until `duration_seconds` pass or `max_injections` injections have
    started. Everything the agent already guarantees applies: the kill switch, one
    injection per type at a time, the resource budget, cleanup on abort.
-3. **Recovery.** Injections still running are left to finish. Then the steady state
+3. **Recovery.** Injections still running are left to finish (everything that can
+   stop a run, such as an abort, the kill switch, a closing window or a removed
+   label, stays active until they have). Then the steady state
    is checked for up to `recovery_timeout_seconds`.
 4. **Verdict.**
 
