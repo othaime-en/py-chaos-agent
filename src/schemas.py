@@ -17,6 +17,7 @@ Rules, applied uniformly:
   a ``KeyError`` mid-injection.
 """
 
+import ipaddress
 import re
 from urllib.parse import urlparse
 from typing import Annotated, Any, Dict, List, Literal, Mapping, Optional, Type
@@ -166,10 +167,98 @@ class ProcessFailureConfig(_FailureBase):
         return self
 
 
+_UNSAFE_DESTINATIONS = [
+    ipaddress.ip_network(n)
+    for n in (
+        "127.0.0.0/8",  # loopback
+        "169.254.0.0/16",  # link-local, includes cloud metadata endpoints
+        "224.0.0.0/4",  # multicast
+        "0.0.0.0/8",  # "this network", includes the unspecified address
+        "::1/128",
+        "fe80::/10",
+        "ff00::/8",
+        "::/128",
+    )
+]
+
+
+class NetworkDestination(_StrictModel):
+    """
+    Delay only traffic to this destination, not the whole interface.
+
+    ``cidr`` is an address or a network (``10.0.4.7``, ``10.0.4.0/24``,
+    ``2001:db8::/48``). With ``port`` only that destination port is delayed;
+    ``protocol`` is then ``tcp`` unless you say ``udp``. Without a port the whole
+    destination is delayed, for ``protocol`` or for any protocol if it is unset.
+
+    Loopback, link-local (cloud metadata), multicast and the unspecified address
+    are refused, as are networks wider than /16 (IPv4) or /48 (IPv6): a delay that
+    broad is not "one dependency" and would also hit the agent's own API and the
+    platform's health probes.
+    """
+
+    cidr: str
+    port: Optional[int] = Field(default=None, ge=1, le=65535)
+    protocol: Optional[Literal["tcp", "udp"]] = None
+
+    @field_validator("cidr")
+    @classmethod
+    def _valid_destination(cls, value: str) -> str:
+        try:
+            network = ipaddress.ip_network(value.strip(), strict=True)
+        except ValueError:
+            raise ValueError(
+                "cidr must be an IP address or a network such as 10.0.4.0/24 "
+                "(no host bits set, no hostnames)"
+            ) from None
+        if any(
+            network.version == bad.version and network.overlaps(bad)
+            for bad in _UNSAFE_DESTINATIONS
+        ):
+            raise ValueError(
+                "cidr must not include loopback, link-local, multicast or the "
+                "unspecified address"
+            )
+        minimum = (
+            limits.MIN_DESTINATION_PREFIX_V4
+            if network.version == 4
+            else limits.MIN_DESTINATION_PREFIX_V6
+        )
+        if network.prefixlen < minimum:
+            raise ValueError(
+                f"cidr is too wide: use /{minimum} or narrower, or no destinations "
+                "to delay the whole interface"
+            )
+        return str(network)
+
+    @model_validator(mode="after")
+    def _port_needs_a_protocol(self) -> "NetworkDestination":
+        if self.port is not None and self.protocol is None:
+            self.protocol = "tcp"
+        return self
+
+
 class NetworkFailureConfig(_FailureBase):
     interface: str = Field(default="eth0", pattern=_INTERFACE_PATTERN)
     delay_ms: int = Field(default=100, ge=limits.MIN_DELAY_MS, le=limits.MAX_DELAY_MS)
     duration_seconds: DurationSeconds
+    # Empty: delay everything leaving the interface (the original behaviour).
+    destinations: List[NetworkDestination] = Field(
+        default_factory=list, max_length=limits.MAX_NETWORK_DESTINATIONS
+    )
+
+    @field_validator("destinations")
+    @classmethod
+    def _no_duplicate_destinations(
+        cls, value: List[NetworkDestination]
+    ) -> List[NetworkDestination]:
+        seen = set()
+        for d in value:
+            key = (d.cidr, d.port, d.protocol)
+            if key in seen:
+                raise ValueError(f"duplicate destination {d.cidr}")
+            seen.add(key)
+        return value
 
 
 FAILURE_MODELS: Dict[str, Type[_FailureBase]] = {
