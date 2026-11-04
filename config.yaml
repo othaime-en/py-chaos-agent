@@ -142,6 +142,11 @@ failures:
     interface: "eth0"  # Network interface to affect
     delay_ms: 100      # Latency to add (in milliseconds)
     duration_seconds: 15
+    # Delay only traffic to these destinations instead of the whole interface
+    # (safer: the agent's own API and the health probes are not slowed).
+    # destinations:
+    #   - cidr: 10.0.4.7
+    #     port: 5432
 
 # Experiments: named runs with a hypothesis, a steady state and a verdict.
 # Optional, and separate from the continuous loop above. Nothing here runs until

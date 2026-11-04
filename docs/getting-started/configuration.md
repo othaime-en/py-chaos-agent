@@ -504,6 +504,58 @@ delay_ms: 1000  # Severe delay (1 second)
 - 150-300ms: Intercontinental
 - 300+ms: Satellite connection
 
+#### `destinations`
+
+**Type:** List  
+**Default:** empty (delay everything leaving the interface)  
+**Description:** Delay only traffic to these destinations. Everything else, including
+the agent's own API and the Kubernetes probes, is left alone. This is safer, and
+a more realistic test: a slow database, not a slow network card.
+
+```yaml
+network:
+  enabled: true
+  probability: 0.25
+  duration_seconds: 20
+  delay_ms: 300
+  destinations:
+    - cidr: 10.0.4.7          # one host (an address means /32)
+      port: 5432              # only this destination port
+    - cidr: 10.0.8.0/24       # a whole network, any port, any protocol
+    - cidr: 10.0.9.20
+      port: 53
+      protocol: udp
+```
+
+| Field | Notes |
+| --- | --- |
+| `cidr` | An IP address or a network (`10.0.4.0/24`, `2001:db8::/48`). Required. No hostnames. No host bits set. |
+| `port` | Optional, 1 to 65535. Only traffic to this **destination** port. |
+| `protocol` | `tcp` or `udp`. Defaults to `tcp` when a port is given, otherwise any protocol. |
+
+Up to 10 destinations. Refused: loopback, link-local (which includes cloud metadata
+endpoints), multicast, the unspecified address, and any network wider than /16
+(IPv4) or /48 (IPv6). Those would delay a large part of the network, and
+**omitting `destinations` is how you ask for that**.
+
+How it works: a `prio` qdisc becomes the root with all traffic mapped to a band
+that is left untouched, `netem` sits on another band, and one `u32` filter per
+destination sends matching **egress** packets there. The whole tree is removed
+when the injection ends, is aborted, or the agent shuts down, and a rule left by a
+crash is repaired at startup.
+
+Limits to know about:
+
+- **Kubernetes Services.** The filter sees the destination *after* kube-proxy has
+  rewritten it, so a ClusterIP will not match. Use the address the pod actually
+  connects to: a pod IP, an external database address, or a node address.
+- **Egress only.** Delaying traffic *from* a dependency back to you needs the rule
+  on the other side.
+- **Ports** are read at a fixed offset, so IPv4 options and IPv6 extension headers
+  are not handled (they are rare).
+- Matching traffic is only delayed. Other fault shapes (loss, jitter, DNS) are
+  separate faults.
+
 ### Requirements
 
 **Kubernetes:**
