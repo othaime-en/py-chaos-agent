@@ -21,10 +21,18 @@ import datetime
 import ipaddress
 import re
 from urllib.parse import urlparse
-from typing import Annotated, Any, Dict, List, Literal, Mapping, Optional, Type
+from typing import Annotated, Any, Dict, List, Literal, Mapping, Optional, Type, Union
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Discriminator,
+    Field,
+    Tag,
+    ValidationError,
+    field_validator,
+)
 from pydantic import model_validator
 
 from . import limits
@@ -524,6 +532,125 @@ class HttpCheckConfig(_StrictModel):
         return self
 
 
+class PrometheusCheckConfig(_StrictModel):
+    """
+    A check on a Prometheus (or compatible) query: an error rate, a latency
+    percentile, anything PromQL can say as one number.
+
+    ``query`` is an instant query that must return a single value (aggregate it
+    with ``sum()`` or ``histogram_quantile()``). The check passes while
+    ``value <operator> threshold`` holds, for example::
+
+        query: 'sum(rate(errors_total[1m])) / sum(rate(requests_total[1m]))'
+        operator: "<"
+        threshold: 0.01
+
+    A query that cannot be answered (the server is down, the query is wrong, it
+    returns several series) is reported as *unavailable* rather than as a breach,
+    and so is "no data" unless ``on_no_data: pass``. Authentication is a bearer
+    token read from the environment variable named in ``bearer_token_env``; the
+    token itself never goes in the config.
+    """
+
+    type: Literal["prometheus"]
+    name: str = Field(pattern=_CHECK_NAME_PATTERN)
+    url: str
+    query: str = Field(min_length=1, max_length=limits.MAX_PROMETHEUS_QUERY_LENGTH)
+    operator: Literal["<", "<=", ">", ">="]
+    threshold: float = Field(allow_inf_nan=False)
+    timeout_seconds: int = Field(
+        default=5,
+        ge=limits.MIN_CHECK_TIMEOUT_SECONDS,
+        le=limits.MAX_CHECK_TIMEOUT_SECONDS,
+    )
+    on_no_data: Literal["fail", "pass"] = "fail"
+    bearer_token_env: Optional[str] = Field(
+        default=None, pattern=r"^[A-Z][A-Z0-9_]{0,63}$"
+    )
+
+    @field_validator("url")
+    @classmethod
+    def _check_url(cls, value: str) -> str:
+        return check_http_url(value, "url")
+
+    @field_validator("query")
+    @classmethod
+    def _printable_query(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("query must not be blank")
+        if any(ord(c) < 32 and c not in "\n\t" for c in value):
+            raise ValueError("query must not contain control characters")
+        return value
+
+
+def _check_kind(value: Any) -> str:
+    """The check type: ``http`` when a config does not say (the original form)."""
+    if isinstance(value, dict):
+        return str(value.get("type", "http"))
+    return str(getattr(value, "type", "http"))
+
+
+# One entry in a list of checks. ``type`` defaults to http so existing configs,
+# which never wrote it, keep working.
+Check = Annotated[
+    Union[
+        Annotated[HttpCheckConfig, Tag("http")],
+        Annotated[PrometheusCheckConfig, Tag("prometheus")],
+    ],
+    Discriminator(
+        _check_kind,
+        custom_error_type="unknown_check_type",
+        custom_error_message="unknown check type; use 'http' or 'prometheus'",
+    ),
+]
+
+
+def _unique_names(checks: List[Any]) -> List[Any]:
+    seen = set()
+    for check in checks:
+        if check.name in seen:
+            raise ValueError(f"duplicate check name '{check.name}'")
+        seen.add(check.name)
+    return checks
+
+
+class SloConfig(_StrictModel):
+    """
+    Limits the system must stay within *while the chaos runs*. They are checked
+    every ``check_interval_seconds``; if they fail ``breach_after`` rounds in a row
+    the experiment is aborted at once, its effects are removed, and the run is
+    recorded as falsified (the system did not stay within its limits). A check that
+    could not be evaluated at all aborts the run too, as inconclusive, because
+    continuing blind is not safe.
+
+    ``grace_seconds`` delays the first round after the chaos starts, for metrics
+    that need time to show an effect. Dry runs evaluate the checks and report, but
+    are never aborted.
+    """
+
+    checks: List[Check] = Field(min_length=1, max_length=limits.MAX_SLO_CHECKS)
+    check_interval_seconds: int = Field(
+        default=5,
+        ge=limits.MIN_SLO_INTERVAL_SECONDS,
+        le=limits.MAX_SLO_INTERVAL_SECONDS,
+    )
+    breach_after: int = Field(
+        default=2,
+        ge=limits.MIN_SLO_BREACH_AFTER,
+        le=limits.MAX_SLO_BREACH_AFTER,
+    )
+    grace_seconds: int = Field(
+        default=0,
+        ge=limits.MIN_SLO_GRACE_SECONDS,
+        le=limits.MAX_SLO_GRACE_SECONDS,
+    )
+
+    @field_validator("checks")
+    @classmethod
+    def _unique_check_names(cls, value: List[Any]) -> List[Any]:
+        return _unique_names(value)
+
+
 class SteadyStateConfig(_StrictModel):
     """
     What "the system is healthy" means for an experiment.
@@ -534,9 +661,7 @@ class SteadyStateConfig(_StrictModel):
     ``required_consecutive_successes`` rounds in a row.
     """
 
-    checks: List[HttpCheckConfig] = Field(
-        min_length=1, max_length=limits.MAX_STEADY_STATE_CHECKS
-    )
+    checks: List[Check] = Field(min_length=1, max_length=limits.MAX_STEADY_STATE_CHECKS)
     check_interval_seconds: int = Field(
         default=2,
         ge=limits.MIN_STEADY_CHECK_INTERVAL_SECONDS,
@@ -560,13 +685,8 @@ class SteadyStateConfig(_StrictModel):
 
     @field_validator("checks")
     @classmethod
-    def _unique_check_names(cls, value: List[HttpCheckConfig]) -> List[HttpCheckConfig]:
-        seen = set()
-        for check in value:
-            if check.name in seen:
-                raise ValueError(f"duplicate check name '{check.name}'")
-            seen.add(check.name)
-        return value
+    def _unique_check_names(cls, value: List[Any]) -> List[Any]:
+        return _unique_names(value)
 
 
 class ExperimentSchedule(_StrictModel):
@@ -777,6 +897,7 @@ class ExperimentConfig(_StrictModel):
     schedule: ExperimentSchedule
     selector: Optional[TargetSelector] = None
     windows: Optional[ExperimentWindows] = None
+    slo: Optional[SloConfig] = None
     dry_run: bool = False
 
     @field_validator("hypothesis")
