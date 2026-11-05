@@ -387,6 +387,159 @@ class TestGracefulStop:
         assert aborted == ["cpu"]
 
 
+class TestConcurrencyCap:
+    def holder(self):
+        """An injector that holds its slot until aborted."""
+
+        def inject(name, cfg, dry_run):
+            with lifecycle.injection(name) as ticket:
+                if ticket is not None:
+                    ticket.sleep(30)
+
+        return inject
+
+    def test_a_second_type_waits_while_the_cap_is_reached(self, engines):
+        e = engines(lambda: None, injector=self.holder(), max_concurrent=1)
+        first = e.run_tick(settings(cpu=True, memory=True), 1)
+        assert first.started == 1 and first.busy == 1
+        assert wait_for(lambda: lifecycle.is_active("cpu"))
+        assert not lifecycle.is_active("memory")
+        e.stop(timeout=5)
+
+    def test_a_cap_of_two_allows_two(self, engines):
+        e = engines(lambda: None, injector=self.holder(), max_concurrent=2)
+        result = e.run_tick(settings(cpu=True, memory=True, network=True), 1)
+        assert result.started == 2 and result.busy == 1
+        e.stop(timeout=5)
+
+    def test_no_cap_starts_them_all(self, engines):
+        e = engines(lambda: None, injector=self.holder())
+        assert e.run_tick(settings(cpu=True, memory=True, network=True), 1).started == 3
+        e.stop(timeout=5)
+
+    def test_dry_runs_hold_nothing_so_they_are_never_capped(self, engines):
+        e = engines(lambda: None, injector=Recorder(), max_concurrent=1)
+        result = e.run_tick(settings(dry_run=True, cpu=True, memory=True), 1)
+        assert result.started == 2 and result.busy == 0
+
+    def test_the_slot_frees_up_when_the_injection_ends(self, engines):
+        rec = Recorder()
+        e = engines(lambda: None, injector=rec, max_concurrent=1)
+        e.run_tick(settings(cpu=True), 1)
+        assert wait_for(lambda: e.in_flight() == 0)
+        assert e.run_tick(settings(cpu=True), 2).started == 1
+
+
+class TestEligibilityGate:
+    def engine(self, engines, state, inj):
+        return engines(
+            lambda: None,
+            injector=inj,
+            eligibility_provider=lambda: state["reason"],
+        )
+
+    def test_an_eligible_agent_injects(self, engines):
+        rec = Recorder()
+        e = self.engine(engines, {"reason": None}, rec)
+        result = e.run_tick(settings(cpu=True), 1)
+        assert result.started == 1 and not result.ineligible
+
+    def test_an_ineligible_agent_skips_the_whole_tick(self, engines):
+        rec = Recorder()
+        e = self.engine(
+            engines, {"reason": "chaos-enabled must be 'true' but is not set"}, rec
+        )
+        result = e.run_tick(settings(cpu=True, memory=True), 1)
+        assert result.ineligible and result.started == 0 and result.attempted == 0
+        time.sleep(0.05)
+        assert rec.calls == []
+
+    def test_dry_runs_are_not_gated(self, engines):
+        rec = Recorder()
+        e = self.engine(engines, {"reason": "not eligible"}, rec)
+        result = e.run_tick(settings(dry_run=True, cpu=True), 1)
+        assert result.started == 1 and not result.ineligible
+
+    def test_losing_eligibility_aborts_running_injections(self, engines):
+        cut = []
+
+        def inject(name, cfg, dry_run):
+            with lifecycle.injection(name) as ticket:
+                if ticket is not None and ticket.sleep(30):
+                    cut.append(name)
+
+        state = {"reason": None}
+        e = self.engine(engines, state, inject)
+        e.run_tick(settings(cpu=True), 1)
+        assert wait_for(lambda: lifecycle.is_active("cpu"))
+        state["reason"] = "label removed"
+        result = e.run_tick(settings(cpu=True), 2)
+        assert result.ineligible
+        assert wait_for(lambda: cut == ["cpu"]), "the running injection was not aborted"
+        assert lifecycle.active_types() == []
+
+    def test_the_loop_aborts_between_ticks_without_waiting_for_the_next_one(
+        self, engines
+    ):
+        """With a long interval the injection must not outlive the label."""
+        cut = []
+
+        def inject(name, cfg, dry_run):
+            with lifecycle.injection(name) as ticket:
+                if ticket is not None and ticket.sleep(30):
+                    cut.append(name)
+
+        state = {"reason": None}
+        e = engines(
+            lambda: settings(interval=600, cpu=True),
+            injector=inject,
+            eligibility_provider=lambda: state["reason"],
+        )
+        e.start()
+        assert wait_for(lambda: lifecycle.is_active("cpu"))
+        state["reason"] = "label removed"
+        assert wait_for(lambda: cut == ["cpu"], timeout=3), "waited for the next tick"
+        assert lifecycle.active_types() == []
+
+    def test_a_dry_run_loop_is_never_aborted_for_eligibility(self, engines):
+        state = {"reason": None}
+        e = engines(
+            lambda: settings(interval=600, dry_run=True, cpu=True),
+            injector=Recorder(),
+            eligibility_provider=lambda: state["reason"],
+        )
+        e.start()
+        state["reason"] = "label removed"
+        time.sleep(0.6)
+        assert e.is_running
+
+    def test_it_resumes_when_eligible_again(self, engines):
+        rec = Recorder()
+        state = {"reason": "no"}
+        e = self.engine(engines, state, rec)
+        assert e.run_tick(settings(cpu=True), 1).ineligible
+        state["reason"] = None
+        assert e.run_tick(settings(cpu=True), 2).started == 1
+
+    def test_no_provider_means_no_gate(self, engines):
+        e = engines(lambda: None, injector=Recorder())
+        assert e.run_tick(settings(cpu=True), 1).started == 1
+
+    def test_the_loop_stops_injecting_while_ineligible(self, engines):
+        rec = Recorder()
+        state = {"reason": "no"}
+        e = engines(
+            lambda: settings(interval=0.02, cpu=True),
+            injector=rec,
+            eligibility_provider=lambda: state["reason"],
+        )
+        e.start()
+        time.sleep(0.3)
+        assert rec.calls == []
+        state["reason"] = None
+        assert wait_for(lambda: len(rec.calls) > 0)
+
+
 class TestHalt:
     def test_halt_stops_rolling_but_leaves_injections_running(self, engines):
         released = threading.Event()
