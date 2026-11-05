@@ -32,6 +32,7 @@ are satisfied by a missing key exactly as in Kubernetes.
 
 import os
 import re
+import socket
 import threading
 import time
 from dataclasses import dataclass, field
@@ -43,6 +44,7 @@ logger = get_logger(__name__)
 
 LABELS_ENV = "CHAOS_TARGET_LABELS"
 LABELS_FILE_ENV = "CHAOS_TARGET_LABELS_FILE"
+ID_ENV = "CHAOS_TARGET_ID"
 
 MAX_LABELS = 100
 MAX_SELECTOR_ITEMS = 20
@@ -313,6 +315,18 @@ class TargetLabels:
     def reset(self) -> None:
         with self._lock:
             self._labels, self._loaded_at, self._error = {}, None, None
+
+
+def agent_id(environ: Optional[Mapping[str, str]] = None) -> str:
+    """
+    A name for this agent that is stable across restarts of the same pod: the
+    ``CHAOS_TARGET_ID`` setting, or else the host name (the pod name on
+    Kubernetes). Used to decide, deterministically, whether this agent is in an
+    experiment's sample.
+    """
+    env = environ if environ is not None else os.environ
+    configured = env.get(ID_ENV, "").strip()
+    return configured or socket.gethostname()
 
 
 # The agent's labels. Read lazily from the environment, so it also works in

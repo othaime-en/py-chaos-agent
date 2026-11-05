@@ -50,6 +50,7 @@ class TestDefaults:
             "duration_seconds": 30,
             "interval_seconds": 10,
             "max_injections": None,
+            "max_concurrent_injections": None,
         }
         ss = out["steady_state"]
         assert ss["check_interval_seconds"] == 2
@@ -600,3 +601,111 @@ class TestSelector:
 
     def test_unknown_keys(self):
         assert "experiments.0.selector.labels" in self.bad({"labels": {"a": "b"}})
+
+
+class TestSampleAndConcurrency:
+    def selector(self, **fields):
+        out = validate_config_dict(doc(experiment(selector=fields)))
+        return out["experiments"][0]["selector"]
+
+    @pytest.mark.parametrize("percent", [0.01, 1, 10, 12.5, 100])
+    def test_good_percentages(self, percent):
+        assert self.selector(sample_percent=percent)["sample_percent"] == percent
+
+    @pytest.mark.parametrize(
+        "percent", [0, -1, 100.01, 101, float("nan"), float("inf"), "10", True]
+    )
+    def test_bad_percentages(self, percent):
+        raw = doc(experiment(selector={"sample_percent": percent}))
+        assert (
+            "experiments.0.selector.sample_percent" in paths(raw)
+            or errors_for(raw).errors
+        )
+
+    def test_a_sample_alone_is_a_valid_selector(self):
+        out = self.selector(sample_percent=10)
+        assert out["match_labels"] == {} and out["match_expressions"] == []
+
+    def test_a_sample_with_labels(self):
+        out = self.selector(match_labels={"env": "staging"}, sample_percent=10)
+        assert out["match_labels"] == {"env": "staging"}
+
+    def test_a_selector_with_nothing_is_still_rejected(self):
+        raw = doc(experiment(selector={}))
+        assert "would match every agent" in str(errors_for(raw))
+
+    def test_the_percentage_is_optional(self):
+        assert self.selector(match_labels={"env": "x"})["sample_percent"] is None
+
+    @pytest.mark.parametrize("value", [1, 2, 4])
+    def test_good_concurrency_caps(self, value):
+        raw = doc(
+            experiment(
+                schedule={"duration_seconds": 30, "max_concurrent_injections": value}
+            )
+        )
+        out = validate_config_dict(raw)["experiments"][0]
+        assert out["schedule"]["max_concurrent_injections"] == value
+
+    @pytest.mark.parametrize("value", [0, 5, -1, "1", True])
+    def test_bad_concurrency_caps(self, value):
+        raw = doc(
+            experiment(
+                schedule={"duration_seconds": 30, "max_concurrent_injections": value}
+            )
+        )
+        assert "experiments.0.schedule.max_concurrent_injections" in paths(raw)
+
+
+class TestAgentEligibility:
+    def agent(self, **fields):
+        return validate_config_dict({"agent": fields, "failures": {}})["agent"]
+
+    def test_off_by_default(self):
+        assert self.agent()["eligibility"] is None
+
+    def test_an_opt_in_label(self):
+        out = self.agent(eligibility={"match_labels": {"chaos-enabled": "true"}})
+        assert out["eligibility"]["match_labels"] == {"chaos-enabled": "true"}
+
+    def test_expressions(self):
+        out = self.agent(
+            eligibility={
+                "match_expressions": [
+                    {"key": "chaos", "operator": "NotIn", "values": ["opt-out"]}
+                ]
+            }
+        )
+        assert out["eligibility"]["match_expressions"][0]["operator"] == "NotIn"
+
+    def test_it_cannot_be_empty(self):
+        with pytest.raises(ConfigValidationError):
+            self.agent(eligibility={})
+
+    def test_a_sample_makes_no_sense_here(self):
+        with pytest.raises(ConfigValidationError, match="cannot use sample_percent"):
+            self.agent(eligibility={"match_labels": {"a": "b"}, "sample_percent": 50})
+
+    def test_a_sample_alone_is_not_an_eligibility_rule(self):
+        with pytest.raises(ConfigValidationError):
+            self.agent(eligibility={"sample_percent": 50})
+
+    def test_label_rules_apply(self):
+        with pytest.raises(ConfigValidationError):
+            self.agent(eligibility={"match_labels": {"bad key": "x"}})
+
+    def test_it_loads_into_the_config(self, tmp_path):
+        path = tmp_path / "config.yaml"
+        path.write_text(
+            yaml.safe_dump(
+                {
+                    "agent": {
+                        "eligibility": {"match_labels": {"chaos-enabled": "true"}}
+                    },
+                    "failures": {},
+                }
+            )
+        )
+        assert load_config(str(path)).agent.eligibility["match_labels"] == {
+            "chaos-enabled": "true"
+        }

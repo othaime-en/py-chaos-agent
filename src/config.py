@@ -21,6 +21,8 @@ class AgentConfig:
         self.interval_seconds = config.get("interval_seconds", 10)
         self.dry_run = config.get("dry_run", False)
         self.auto_start = config.get("auto_start", False)
+        # Validated selector dict (see src.schemas.TargetSelector) or None.
+        self.eligibility = config.get("eligibility")
 
 
 class Config:
