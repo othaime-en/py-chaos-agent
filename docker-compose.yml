@@ -80,7 +80,7 @@ services:
       - CHAOS_AUDIT_LOG_FILE=/var/log/chaos-agent/audit.log
       # This agent's labels. An experiment with a selector only runs where they
       # match (see docs/user-guide/experiments.md).
-      - CHAOS_TARGET_LABELS=env=local,app=resilient-app
+      - CHAOS_TARGET_LABELS=env=local,app=resilient-app,chaos-enabled=true
       # Optional hardening, see docs/user-guide/api-security.md:
       #   CHAOS_API_TOKENS_FILE=/run/secrets/tokens.yaml   per-user tokens with roles
       #   CHAOS_TLS_CERT_FILE / CHAOS_TLS_KEY_FILE         serve HTTPS (the healthcheck

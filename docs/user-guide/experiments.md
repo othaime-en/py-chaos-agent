@@ -198,7 +198,7 @@ prefix is a DNS name. A value is empty or follows the name rule.
 | You start a run on an agent that does not match | Refused with `409`, listing every unmet condition (for example `env must be 'staging' but is 'prod'`). No run is created and nothing is probed. The target is checked before the time window. |
 | The labels stop matching during the baseline check | The run ends `refused`. Nothing was injected. |
 | The labels stop matching during the chaos | The run is aborted, injections are cut short and their effects removed. Verdict `inconclusive`. |
-| Dry run | The selector does not apply. |
+| Dry run | Never blocked. It runs, and its `selection` says what a real run would have been told. |
 
 The labels file is re-read about once a second and **fails closed**: if it cannot
 be read or is invalid, the agent has no labels and a running experiment stops,
@@ -212,6 +212,122 @@ kubectl -n chaos-demo label pod <pod> env-     # remove the label, the chaos sto
 
 A run records the labels it started with (`target_labels`) and so does the
 `experiment.started` audit event.
+
+## Choosing who and how many
+
+Selection is a series of gates, checked in this order. Each is reported with its
+reason, so a refusal, a dry run and the preview all say the same thing.
+
+| Gate | Question | Configured in |
+| --- | --- | --- |
+| `eligibility` | Has this agent opted in to chaos at all? | `agent.eligibility` |
+| `selector` | Do its labels match the experiment? | `experiments[].selector` |
+| `window` | Is it inside the allowed time, and out of every blackout? | `experiments[].windows` |
+| `sample` | Is it in the sampled share of the matching agents? | `selector.sample_percent` |
+| `kill_switch` | Is the kill switch holding chaos back? | `kill_switch` |
+| `idle` | Is anything already running? | |
+
+### Opt-in eligibility
+
+Labels you forget fail safe if eligibility is **opt-in**: a pod only runs chaos if
+it carries a label that says so.
+
+```yaml
+agent:
+  eligibility:
+    match_labels:
+      chaos-enabled: "true"
+```
+
+A pod without `chaos-enabled=true` cannot run an experiment, a manual injection
+or the continuous loop. This is a policy for the whole agent, set in the config
+by the operator; it cannot be changed through the API. Dry runs are not gated.
+
+Removing the label is an off switch: it aborts a running experiment (checked
+continuously) and the loop's running injections (checked every 0.25 seconds, so
+not only on the next tick), and their effects are removed. `GET /status` shows
+`eligible` and `eligibility_reason`.
+
+The same rule can express exclusion instead of opt-in, using `NotIn` or
+`DoesNotExist`:
+
+```yaml
+agent:
+  eligibility:
+    match_expressions:
+      - key: chaos
+        operator: NotIn
+        values: [opt-out]
+      - key: namespace
+        operator: NotIn
+        values: [prod]
+```
+
+The agent only knows the labels it is given. To exclude by namespace, pass the
+namespace in as a label (on Kubernetes with the downward API, for example
+`CHAOS_TARGET_LABELS=namespace=$(POD_NAMESPACE)`).
+
+### Sampling: how many
+
+`sample_percent` limits an experiment to a share of the agents that match.
+
+```yaml
+selector:
+  match_labels:
+    env: staging
+  sample_percent: 10
+```
+
+Each agent decides for itself, with no coordination. It hashes its identity, the
+experiment name and a **sample key** into a number from 0 to 100, and runs if that
+is below `sample_percent`. So:
+
+- The same agents are picked every time, until you change the sample key. Pass a
+  new key to draw a new sample: `POST /experiments/{name}/run` with
+  `{"sample_key": "2026-11-05"}` (letters, digits, `.`, `_`, `:` and `-`, up to 64).
+- An agent's identity is `CHAOS_TARGET_ID`, or the host name (the pod name on
+  Kubernetes). `GET /target` shows it.
+- The share picked is close to the percentage for a large fleet and only
+  approximate for a small one. It is a dice roll per agent, **not a count**: ten
+  agents at 10% may well pick none, or three. If you need "exactly one", name it
+  with a selector instead.
+
+### At most N at once
+
+`schedule.max_concurrent_injections` (1 to 4) limits how many faults of one
+experiment run at the same time, on top of the rule that a type never overlaps with
+itself. With `1`, an experiment with `cpu` and `network` faults runs them one at a
+time. A fault that would exceed the cap waits for the next roll.
+
+### Why was this agent (not) selected?
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" \
+  localhost:9000/experiments/cpu-recovery/selection
+```
+
+```json
+{
+  "experiment": "cpu-recovery",
+  "agent_id": "checkout-7d9f6-abcde",
+  "would_run": false,
+  "gates": [
+    {"gate": "eligibility", "ok": false, "detail": "chaos-enabled must be 'true' but is not set"},
+    {"gate": "selector", "ok": true, "detail": "labels match the selector"},
+    {"gate": "sample", "ok": false, "detail": "this agent is not in the 10% sample (position 42.7, needs to be below 10)"},
+    {"gate": "kill_switch", "ok": true, "detail": "the kill switch is not holding chaos back"},
+    {"gate": "idle", "ok": true, "detail": "nothing else is running"}
+  ]
+}
+```
+
+It changes nothing. `?sample_key=` previews a different sample. The resource budget
+is checked when you start a run, not here.
+
+A **dry run** reports instead of being blocked: it still rehearses the flow
+(baseline check, steady state, verdict), and the run's `selection` field records
+exactly what a real run on this agent would have been told. Every real run records
+its `selection` too, and so does the `experiment.started` audit event.
 
 ## Time windows
 
@@ -237,7 +353,8 @@ experiments:
 | Field | Default | Notes |
 | --- | --- | --- |
 | `timezone` | `UTC` | An IANA name such as `Europe/Berlin`. Unknown names are a config error. |
-| `allow` | required | 1 to 20 windows. |
+| `allow` | none | Up to 20 windows. Without any, it may run at any time except during a blackout. |
+| `blackouts` | none | Up to 50 periods when it must never run. See [Blackouts](#blackouts). At least one of `allow` or `blackouts` is required. |
 | `allow[].days` | every day | Any of `mon` to `sun`. The day the window **starts** on. |
 | `allow[].start` | required | `HH:MM`, 24-hour, `00:00` to `23:59`. |
 | `allow[].end` | required | `HH:MM`, or `24:00` for midnight. Must differ from `start`. |
@@ -253,15 +370,47 @@ How the rules work:
   window keeps its clock times, so it is an hour shorter or longer. A boundary
   inside the skipped or repeated hour resolves the way Python's `zoneinfo` does.
 
+### Blackouts
+
+A blackout is a date range when the experiment must never run, whatever the
+windows say: a deploy freeze, a sale, a holiday.
+
+```yaml
+windows:
+  timezone: Africa/Dar_es_Salaam
+  allow:
+    - days: [mon, tue, wed, thu]
+      start: "10:00"
+      end: "16:00"
+  blackouts:
+    - from: 2026-12-20
+      to: 2027-01-03
+      reason: holiday freeze
+```
+
+| Field | Notes |
+| --- | --- |
+| `from`, `to` | Dates, `YYYY-MM-DD`, **both inclusive**, whole days in `timezone`. `to` must not be before `from`; a blackout lasts at most 366 days. Quoted or not (YAML turns bare dates into dates, which is fine). |
+| `reason` | Optional, up to 100 characters. Shown in refusals and in the API. |
+
+- A blackout beats an allowed window. A window that falls inside one is closed.
+- A window that would run into a blackout is cut off at its start: the fit check
+  and the mid-run abort both use that, so chaos stops when the freeze begins.
+- Overlapping or touching blackouts count as one and keep both reasons.
+- `allow` can be left out: "any time except these dates".
+- The next opening skips over blackouts, and lands on a real window, not just on
+  the day after the blackout ends.
+
 What the agent does with them:
 
 | When | What happens |
 | --- | --- |
+| You start a run in a blackout | Refused with `409`: `In a blackout period (holiday freeze); the next allowed time opens ...`. |
 | You start a run outside every window | Refused with `409`. The message gives the next opening in the window's own zone. No run is created and nothing is probed. |
 | You start a run but the chaos would outlast the window | Refused with `409`. The estimate is the schedule plus the longest single fault (with `max_injections`, the time until the last allowed injection starts, plus the longest fault). The baseline and recovery checks are not counted. |
 | The window closes during the baseline check | The run ends `refused`. Nothing was injected. |
 | The window closes during the chaos | The run is aborted, injections are cut short and their effects removed. Verdict `inconclusive`, reason "the allowed time window closed". |
-| Dry run | Windows do not apply. A dry run changes nothing, so you can test any time. |
+| Dry run | Never blocked. It runs, and its `selection` says what a real run would have been told. |
 
 There is no override in the API. A window is a safety limit; to change it, edit
 the config and `POST /config/reload`. The windows decide only whether a run may
@@ -276,6 +425,7 @@ now and when it closes or next opens (UTC), and a run reports `window_closes_at`
 | --- | --- | --- |
 | `GET /experiments` | viewer | Summaries of every defined experiment. |
 | `GET /experiments/{name}` | viewer | One experiment in full, with whether its window is open and whether this agent matches its selector. |
+| `GET /experiments/{name}/selection` | viewer | Every selection gate with its reason; whether this agent would run it now. |
 | `GET /target` | viewer | The labels this agent has, which selectors are matched against. |
 | `POST /experiments/{name}/run` | operator | Start a run. Returns `202` and the run. Optional body `{"dry_run": true}`. |
 | `GET /experiment-runs` | viewer | Recent runs, newest first (the last 50 are kept in memory). |
@@ -298,8 +448,10 @@ changes for the next run; a run in progress keeps the copy it started with.
 | `422` | A fault does not fit the container's resource budget (same rule as a manual injection), or the body is invalid. |
 | `503` | The agent is shutting down. |
 
-Dry runs skip the injection, kill switch, budget, selector and time window
-refusals, since they change nothing.
+Dry runs are not refused for the injection, kill switch, budget, selector, sample,
+eligibility or time window reasons, since they change nothing. They run, and the run
+records which of those a real run would have hit (see
+[Why was this agent (not) selected?](#why-was-this-agent-not-selected)).
 
 While an experiment runs, `POST /agent/start` and non-dry-run `POST /inject/manual`
 return `409`. Two sources of chaos at once would make the result unreadable.
