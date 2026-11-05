@@ -1,6 +1,7 @@
 import signal
 import sys
 import logging
+from . import selection, targets
 from .config import load_config, validate_config
 from .metrics import MetricsServerError, metrics_port_from_env, start_metrics_server
 from .resources import apply_settings_and_report
@@ -46,6 +47,14 @@ def main():
     # Setup logging from config.yaml
     logging_config = config.raw_config.get("logging", {})
     setup_logging(logging_config)
+
+    # Labels that are set but invalid would make the eligibility rule fail closed
+    # without saying why: stop here and say it instead.
+    try:
+        targets.agent_labels.validate_startup()
+    except targets.TargetLabelsError as e:
+        print(f"CRITICAL: Refusing to start: {e}", file=sys.stderr)
+        sys.exit(1)
 
     # Now we can get the logger
     logger = get_logger(__name__)
@@ -124,6 +133,9 @@ def main():
         settings_provider=lambda: snapshot_settings(config),
         kill_switch_provider=lambda: (
             kill_switch if config.kill_switch.enabled else None
+        ),
+        eligibility_provider=lambda: selection.eligibility_problem(
+            config.agent.eligibility, targets.agent_labels.get()
         ),
         name="chaos-agent",
     )
