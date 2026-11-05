@@ -20,6 +20,10 @@ Rules:
 * Redirects are not followed, so a check cannot be bounced to another host.
 """
 
+import json
+import math
+import operator
+import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -41,14 +45,21 @@ class CheckResult:
     ok: bool
     detail: str
     latency_ms: Optional[int] = None
+    # True when the check could not be evaluated at all (a metrics server that is
+    # down, a rejected query) as opposed to evaluating and failing. Only
+    # Prometheus checks can be unavailable; an http check that fails is a failure.
+    unavailable: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        data: Dict[str, Any] = {
             "name": self.name,
             "ok": self.ok,
             "detail": self.detail,
             "latency_ms": self.latency_ms,
         }
+        if self.unavailable:
+            data["unavailable"] = True
+        return data
 
 
 @dataclass(frozen=True)
@@ -113,8 +124,129 @@ def run_http_check(check: Mapping[str, Any]) -> CheckResult:
     return CheckResult(name, True, f"HTTP {status} in {latency_ms} ms", latency_ms)
 
 
+_OPERATORS = {
+    "<": operator.lt,
+    "<=": operator.le,
+    ">": operator.gt,
+    ">=": operator.ge,
+}
+
+
+class _Unavailable(Exception):
+    """The query could not be answered; the message says why."""
+
+
+def _query_value(payload: Any) -> Optional[float]:
+    """
+    The single number a Prometheus instant-query response holds, or ``None`` for
+    "no data". Raises _Unavailable for anything that is not exactly one value.
+    """
+    if not isinstance(payload, dict):
+        raise _Unavailable("response is not a Prometheus result")
+    if payload.get("status") != "success":
+        raise _Unavailable(f"Prometheus error: {payload.get('errorType', 'unknown')}")
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        raise _Unavailable("response has no data")
+    kind = data.get("resultType")
+    result: Any = data.get("result")
+    try:
+        if kind == "scalar":
+            text = result[1]
+        elif kind == "vector":
+            if not isinstance(result, list) or len(result) == 0:
+                return None
+            if len(result) > 1:
+                raise _Unavailable(
+                    f"query returned {len(result)} series, expected 1 "
+                    "(aggregate it with sum, avg or max)"
+                )
+            text = result[0]["value"][1]
+        else:
+            raise _Unavailable(f"unsupported result type '{kind}'")
+        value = float(text)
+    except _Unavailable:
+        raise
+    except (KeyError, IndexError, TypeError, ValueError):
+        raise _Unavailable("response is not a number") from None
+    # 0/0 and similar come back as NaN: that is "no data", not a value.
+    return None if math.isnan(value) else value
+
+
+def run_prometheus_check(check: Mapping[str, Any]) -> CheckResult:
+    """
+    Run one Prometheus check. Never raises.
+
+    The check passes while ``value <operator> threshold`` holds. A value that
+    violates it is a failure; anything that stops the query being answered (the
+    server is down, a rejected query, several series, no data unless
+    ``on_no_data: pass``) is *unavailable*.
+    """
+    name = str(check.get("name", "check"))
+    timeout = check.get("timeout_seconds", 5)
+
+    def unavailable(detail: str, latency: Optional[int] = None) -> CheckResult:
+        return CheckResult(name, False, detail, latency, unavailable=True)
+
+    headers: Dict[str, str] = {}
+    token_env = check.get("bearer_token_env")
+    if token_env:
+        token = os.environ.get(token_env, "")
+        if not token:
+            return unavailable(f"{token_env} is not set")
+        headers["Authorization"] = f"Bearer {token}"
+
+    started = time.monotonic()
+    limit = 1024 * 1024
+    try:
+        response = requests.get(
+            check["url"].rstrip("/") + "/api/v1/query",
+            params={"query": check["query"]},
+            headers=headers,
+            timeout=timeout,
+            allow_redirects=False,
+            stream=True,
+        )
+        try:
+            status = response.status_code
+            raw = response.raw.read(limit + 1, decode_content=True)
+        finally:
+            response.close()
+    except requests.exceptions.Timeout:
+        return unavailable(f"timed out after {timeout}s")
+    except requests.exceptions.RequestException as e:
+        return unavailable(type(e).__name__)
+    except Exception as e:  # a broken probe must not look like a healthy target
+        logger.error("Unexpected error in Prometheus check", exc_info=True)
+        return unavailable(f"unexpected {type(e).__name__}")
+    latency_ms = int((time.monotonic() - started) * 1000)
+
+    if status != 200:
+        return unavailable(f"HTTP {status}", latency_ms)
+    if len(raw) > limit:
+        return unavailable("response too large", latency_ms)
+    try:
+        value = _query_value(json.loads(raw))
+    except _Unavailable as e:
+        return unavailable(str(e), latency_ms)
+    except ValueError:
+        return unavailable("response is not JSON", latency_ms)
+
+    if value is None:
+        if check.get("on_no_data") == "pass":
+            return CheckResult(name, True, "no data (treated as passing)", latency_ms)
+        return unavailable("no data returned", latency_ms)
+
+    op = check["operator"]
+    threshold = float(check["threshold"])
+    if _OPERATORS[op](value, threshold):
+        return CheckResult(name, True, f"{value:g} {op} {threshold:g}", latency_ms)
+    return CheckResult(name, False, f"{value:g} is not {op} {threshold:g}", latency_ms)
+
+
 _RUNNERS: Dict[str, Callable[[Mapping[str, Any]], CheckResult]] = {
     "http": run_http_check,
+    "prometheus": run_prometheus_check,
 }
 
 
