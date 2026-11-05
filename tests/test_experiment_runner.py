@@ -970,3 +970,256 @@ class TestDrainIsWatched:
         result = run_to_end(runner, make_experiment(target, schedule=self.CAPPED))
         assert result["status"] == "completed"
         assert inj.completed == ["cpu"] and inj.cut_short == []
+
+
+# ---------------------------------------------------------------------------
+# Eligibility, sampling, the selection report and the concurrency cap
+# ---------------------------------------------------------------------------
+
+from src.selection import sample_bucket  # noqa: E402
+
+OPT_IN = {"match_labels": {"chaos-enabled": "true"}}
+
+
+def agent_in_sample(experiment_name, percent, key="", want=True):
+    """An agent id that is (or is not) in the sample, found by search."""
+    for i in range(10000):
+        agent = f"pod-{i}"
+        if (sample_bucket(agent, experiment_name, key) < percent) == want:
+            return agent
+    raise AssertionError("no such agent")
+
+
+class TestEligibility:
+    def runner(self, runners, labels, rule=OPT_IN, **kwargs):
+        return runners(
+            injector=Injector(),
+            labels_provider=labels,
+            eligibility_provider=lambda: rule,
+            **kwargs,
+        )
+
+    def test_a_pod_without_the_opt_in_label_cannot_run_anything(self, runners, target):
+        runner = self.runner(runners, Labels(env="staging"))
+        with pytest.raises(
+            TargetMismatch, match="not eligible for chaos: chaos-enabled must be"
+        ):
+            runner.start(make_experiment(target))
+        assert runner.history() == [] and target.hits == 0
+
+    def test_the_opt_in_label_lets_it_run(self, runners, target):
+        runner = self.runner(runners, Labels(**{"chaos-enabled": "true"}))
+        assert run_to_end(runner, make_experiment(target))["status"] == "completed"
+
+    def test_it_applies_to_experiments_with_no_selector_of_their_own(
+        self, runners, target
+    ):
+        runner = self.runner(runners, Labels())
+        with pytest.raises(TargetMismatch):
+            runner.start(make_experiment(target))
+
+    def test_it_is_checked_before_the_experiments_own_selector(self, runners, target):
+        runner = self.runner(runners, Labels(env="prod"))
+        with pytest.raises(TargetMismatch, match="not eligible for chaos"):
+            runner.start(selected(target))
+
+    def test_no_rule_means_no_gate(self, runners, target):
+        runner = self.runner(runners, Labels(), rule=None)
+        assert run_to_end(runner, make_experiment(target))["status"] == "completed"
+
+    def test_removing_the_opt_in_label_stops_a_running_experiment(
+        self, runners, target
+    ):
+        labels = Labels(**{"chaos-enabled": "true"})
+        inj = Injector()
+        inj.hold_seconds = 30
+        runner = runners(
+            injector=inj, labels_provider=labels, eligibility_provider=lambda: OPT_IN
+        )
+        run = runner.start(
+            make_experiment(
+                target, schedule={"duration_seconds": 60, "interval_seconds": 1}
+            )
+        )
+        assert wait_for(lambda: lifecycle.is_active("cpu"))
+        labels.labels.clear()
+        result = finished(runner, run["id"])
+        assert result["status"] == "aborted"
+        assert "no longer eligible for chaos" in result["reason"]
+        assert inj.cut_short == ["cpu"] and lifecycle.active_types() == []
+
+    def test_losing_it_during_the_baseline_refuses_the_run(self, runners, target):
+        target.status = 503
+        labels = Labels(**{"chaos-enabled": "true"})
+        inj = Injector()
+        runner = runners(
+            injector=inj, labels_provider=labels, eligibility_provider=lambda: OPT_IN
+        )
+        run = runner.start(
+            make_experiment(target, steady_state={"baseline_timeout_seconds": 60})
+        )
+        assert wait_for(lambda: runner.get(run["id"])["status"] == "checking_baseline")
+        labels.labels.clear()
+        target.status = 200
+        result = finished(runner, run["id"], timeout=5)
+        assert result["status"] == "refused"
+        assert "no longer eligible for chaos" in result["reason"]
+        assert inj.calls == []
+
+
+class TestSampling:
+    SAMPLE = {"sample_percent": 10}
+
+    def test_an_agent_outside_the_sample_is_refused(self, runners, target):
+        agent = agent_in_sample("cpu-spike", 10, want=False)
+        runner = runners(injector=Injector(), labels_provider=Labels(), agent_id=agent)
+        with pytest.raises(TargetMismatch, match="not in the experiment's sample"):
+            runner.start(selected(target, self.SAMPLE))
+        assert runner.history() == [] and target.hits == 0
+
+    def test_an_agent_in_the_sample_runs(self, runners, target):
+        agent = agent_in_sample("cpu-spike", 10, want=True)
+        runner = runners(injector=Injector(), labels_provider=Labels(), agent_id=agent)
+        result = run_to_end(runner, selected(target, self.SAMPLE))
+        assert result["status"] == "completed"
+        gate = {g["gate"]: g for g in result["selection"]["gates"]}["sample"]
+        assert gate["ok"] and "in the 10% sample" in gate["detail"]
+
+    def test_the_same_agent_gets_the_same_answer_every_time(self, runners, target):
+        agent = agent_in_sample("cpu-spike", 10, want=False)
+        runner = runners(injector=Injector(), labels_provider=Labels(), agent_id=agent)
+        for _ in range(3):
+            with pytest.raises(TargetMismatch):
+                runner.start(selected(target, self.SAMPLE))
+
+    def test_a_new_sample_key_draws_again(self, runners, target):
+        agent = agent_in_sample("cpu-spike", 10, want=False)
+        key = next(
+            f"day-{i}"
+            for i in range(1000)
+            if sample_bucket(agent, "cpu-spike", f"day-{i}") < 10
+        )
+        runner = runners(injector=Injector(), labels_provider=Labels(), agent_id=agent)
+        with pytest.raises(TargetMismatch):
+            runner.start(selected(target, self.SAMPLE))
+        run = runner.start(selected(target, self.SAMPLE), sample_key=key)
+        assert finished(runner, run["id"])["status"] == "completed"
+
+    def test_labels_and_a_sample_must_both_pass(self, runners, target):
+        agent = agent_in_sample("cpu-spike", 100, want=True)
+        selector = {"match_labels": {"env": "staging"}, "sample_percent": 100}
+        runner = runners(
+            injector=Injector(), labels_provider=Labels(env="prod"), agent_id=agent
+        )
+        with pytest.raises(TargetMismatch, match="env must be 'staging'"):
+            runner.start(selected(target, selector))
+
+    def test_the_agent_id_defaults_to_the_environment(
+        self, runners, target, monkeypatch
+    ):
+        monkeypatch.setenv("CHAOS_TARGET_ID", "pod-from-env")
+        assert runners(injector=Injector()).agent_id() == "pod-from-env"
+
+
+class TestSelectionReport:
+    def test_a_real_run_records_what_selected_it(self, runners, target):
+        runner = runners(injector=Injector(), labels_provider=Labels(env="staging"))
+        result = run_to_end(runner, selected(target))
+        assert result["selection"] == {
+            "eligible": True,
+            "gates": [
+                {"gate": "selector", "ok": True, "detail": "labels match the selector"}
+            ],
+        }
+
+    def test_a_dry_run_is_not_blocked_but_says_why_it_would_have_been(
+        self, runners, target
+    ):
+        inj = Injector()
+        runner = runners(
+            injector=inj,
+            labels_provider=Labels(env="prod"),
+            eligibility_provider=lambda: OPT_IN,
+        )
+        result = run_to_end(runner, selected(target), dry_run=True)
+        assert result["status"] == "completed", "a dry run still rehearses the flow"
+        assert inj.calls
+        assert result["selection"]["eligible"] is False
+        failed = {
+            g["gate"]: g["detail"] for g in result["selection"]["gates"] if not g["ok"]
+        }
+        assert set(failed) == {"eligibility", "selector"}
+        assert "chaos-enabled must be" in failed["eligibility"]
+        assert "env must be 'staging' but is 'prod'" in failed["selector"]
+
+    def test_a_dry_run_reports_the_window_and_sample_too(self, runners, target):
+        agent = agent_in_sample("cpu-spike", 10, want=False)
+        runner = runners(
+            injector=Injector(),
+            labels_provider=Labels(),
+            agent_id=agent,
+            clock=FakeClock("2026-11-07 03:00"),
+        )
+        exp = selected(target, {"sample_percent": 10}, windows=MON_10_TO_16)
+        result = run_to_end(runner, exp, dry_run=True)
+        gates = {g["gate"]: g for g in result["selection"]["gates"]}
+        assert not gates["window"]["ok"] and "opens" in gates["window"]["detail"]
+        assert not gates["sample"]["ok"]
+
+    def test_the_selection_is_in_the_audit_log(self, runners, target):
+        runner = runners(injector=Injector(), labels_provider=Labels(env="staging"))
+        run_to_end(runner, selected(target))
+        assert wait_for(lambda: audit.recent(event="experiment.finished"))
+        assert (
+            audit.recent(event="experiment.started")[0]["selection"]["eligible"] is True
+        )
+
+    def test_preview_changes_nothing(self, runners, target):
+        inj = Injector()
+        runner = runners(injector=inj, labels_provider=Labels(env="prod"))
+        result = runner.select(selected(target), report_state=True)
+        assert not result.eligible
+        assert runner.history() == [] and inj.calls == [] and target.hits == 0
+
+
+class TestConcurrencyCapInAnExperiment:
+    FAULTS = {
+        "cpu": {"enabled": True, "probability": 1.0, "duration_seconds": 5},
+        "memory": {"enabled": True, "probability": 1.0, "duration_seconds": 5},
+    }
+
+    def test_a_cap_of_one_runs_a_single_fault_at_a_time(self, runners, target):
+        inj = Injector()
+        inj.hold_seconds = 30
+        runner = runners(injector=inj)
+        exp = make_experiment(
+            target,
+            faults=self.FAULTS,
+            schedule={
+                "duration_seconds": 60,
+                "interval_seconds": 0.1,
+                "max_concurrent_injections": 1,
+            },
+        )
+        run = runner.start(exp)
+        assert wait_for(lambda: lifecycle.is_active("cpu"))
+        time.sleep(0.5)
+        assert [name for name, _ in inj.calls] == [
+            "cpu"
+        ], "memory started alongside cpu"
+        runner.abort()
+        finished(runner, run["id"])
+
+    def test_without_a_cap_both_run_together(self, runners, target):
+        inj = Injector()
+        inj.hold_seconds = 30
+        runner = runners(injector=inj)
+        exp = make_experiment(
+            target,
+            faults=self.FAULTS,
+            schedule={"duration_seconds": 60, "interval_seconds": 0.1},
+        )
+        run = runner.start(exp)
+        assert wait_for(lambda: {n for n, _ in inj.calls} == {"cpu", "memory"})
+        runner.abort()
+        finished(runner, run["id"])

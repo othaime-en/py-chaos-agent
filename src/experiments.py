@@ -52,8 +52,10 @@ from .kill_switch import KillSwitch
 from .lifecycle import lifecycle
 from .logging_config import get_logger
 from .metrics import EXPERIMENT_ACTIVE, EXPERIMENTS_TOTAL
+from . import selection as selecting
 from . import targets
 from . import windows as time_windows
+from .selection import chaos_budget_seconds  # noqa: F401  (re-exported)
 from .steady_state import SteadyStateResult, wait_for_steady_state
 
 logger = get_logger(__name__)
@@ -77,27 +79,6 @@ class TargetMismatch(RuntimeError):
 class OutsideWindow(RuntimeError):
     """The experiment may not start now: its allowed time window is closed, or
     will close before the chaos could finish."""
-
-
-def chaos_budget_seconds(experiment: Mapping[str, Any]) -> float:
-    """
-    The longest the chaos phase of ``experiment`` can last, worst case.
-
-    That is the scheduled duration (or, with ``max_injections``, the time until
-    the last allowed injection starts) plus the longest single fault, which may
-    still be running when the schedule ends. The baseline and recovery checks
-    are not chaos and are not counted.
-    """
-    schedule = experiment["schedule"]
-    active = float(schedule["duration_seconds"])
-    cap = schedule.get("max_injections")
-    if cap is not None:
-        active = min(active, (cap - 1) * float(schedule["interval_seconds"]))
-    longest = max(
-        (f.get("duration_seconds", 0) for f in experiment["faults"].values()),
-        default=0,
-    )
-    return active + longest
 
 
 class RunStatus(str, Enum):
@@ -148,6 +129,7 @@ class ExperimentRun:
     injections_started: int = 0
     window_closes_at: Optional[dt.datetime] = None
     target_labels: Optional[Dict[str, str]] = None
+    selection: Optional[Dict[str, Any]] = None
     baseline: Optional[SteadyStateResult] = None
     recovery: Optional[SteadyStateResult] = None
 
@@ -176,6 +158,7 @@ class ExperimentRun:
             "duration_seconds": duration,
             "injections_started": self.injections_started,
             "window_closes_at": time_windows.iso(self.window_closes_at),
+            "selection": self.selection,
             "target_labels": (
                 dict(self.target_labels) if self.target_labels is not None else None
             ),
@@ -199,6 +182,10 @@ class ExperimentRunner:
             Defaults to the real clock. Injectable for tests.
         labels_provider: Returns this agent's labels for target selectors.
             Defaults to the labels from the environment (``src.targets``).
+        eligibility_provider: Returns the agent-wide eligibility rule (a selector
+            dict) or ``None``. Chaos only runs while the labels satisfy it.
+        agent_id: This agent's identity for sampling. Defaults to
+            ``CHAOS_TARGET_ID`` or the host name.
     """
 
     def __init__(
@@ -208,11 +195,17 @@ class ExperimentRunner:
         history_size: int = HISTORY_SIZE,
         clock: Optional[Callable[[], dt.datetime]] = None,
         labels_provider: Optional[Callable[[], Mapping[str, str]]] = None,
+        eligibility_provider: Optional[
+            Callable[[], Optional[Mapping[str, Any]]]
+        ] = None,
+        agent_id: Optional[str] = None,
     ) -> None:
         self._ks_provider = kill_switch_provider or (lambda: None)
         self._injector = injector
         self._clock = clock
         self._labels_provider = labels_provider
+        self._eligibility_provider = eligibility_provider
+        self._agent_id = agent_id
         self._lock = threading.RLock()
         self._history: Deque[ExperimentRun] = deque(maxlen=history_size)
         self._current: Optional[ExperimentRun] = None
@@ -255,16 +248,20 @@ class ExperimentRunner:
         principal: str = "unknown",
         role: Optional[str] = None,
         dry_run: Optional[bool] = None,
+        sample_key: str = "",
     ) -> Dict[str, Any]:
         """
         Start ``experiment`` (a validated experiment dict) and return the new run.
 
-        ``dry_run`` overrides the experiment's own setting when given. Raises
-        :class:`ExperimentBusy` if another experiment is running,
-        :class:`TargetMismatch` if its selector does not match this agent's
-        labels, and :class:`OutsideWindow` if its time windows are closed or too
-        short for it. A dry run changes nothing, so neither the selector nor the
-        windows apply to it.
+        ``dry_run`` overrides the experiment's own setting when given;
+        ``sample_key`` picks which agents fall in a ``sample_percent`` sample.
+
+        Raises :class:`ExperimentBusy` if another experiment is running,
+        :class:`TargetMismatch` if this agent is not eligible, not selected, or
+        not in the sample, and :class:`OutsideWindow` if its time windows are
+        closed or too short for it. A dry run changes nothing, so it is never
+        refused for those reasons: it runs, and the run's ``selection`` says what
+        a real run would have been told.
         """
         # A private copy: a config reload while the experiment runs must not
         # change it halfway.
@@ -275,9 +272,9 @@ class ExperimentRunner:
                 raise ExperimentBusy(
                     f"Experiment '{self._current.experiment}' is already running"
                 )
+            selection = self.select(exp, sample_key)
             if not effective_dry_run:
-                self._check_target(exp)
-                self._check_window(exp)
+                self._enforce(selection)
             run = ExperimentRun(
                 id=uuid.uuid4().hex[:12],
                 experiment=exp["name"],
@@ -286,6 +283,7 @@ class ExperimentRunner:
                 principal=principal,
                 role=role,
                 created_at=time.time(),
+                selection=selection.to_dict(),
                 target_labels=(
                     dict(self.target_labels())
                     if exp.get("selector") and not effective_dry_run
@@ -344,39 +342,59 @@ class ExperimentRunner:
             return dict(self._labels_provider())
         return targets.agent_labels.get()
 
-    def _check_target(self, exp: Mapping[str, Any]) -> None:
-        """Raise TargetMismatch unless this agent is one the experiment selects."""
-        result = targets.match(exp.get("selector"), self.target_labels())
-        if not result.matches:
-            raise TargetMismatch(
-                "This agent is not a target of the experiment: " + result.summary
-            )
-
     def _now(self) -> dt.datetime:
         return self._clock() if self._clock else time_windows.utcnow()
 
-    def _check_window(self, exp: Mapping[str, Any]) -> None:
-        """Raise OutsideWindow unless the chaos can start now and finish in time."""
-        spec = exp.get("windows")
-        if not spec:
-            return
-        now = self._now()
-        status = time_windows.evaluate(spec, now)
-        if not status.open:
-            raise OutsideWindow(
-                "Outside the allowed time window; the next one opens "
-                + time_windows.format_local(status.opens_at, spec)
-            )
-        assert status.closes_at is not None
-        needed = chaos_budget_seconds(exp)
-        remaining = (status.closes_at - now).total_seconds()
-        if needed > remaining:
-            raise OutsideWindow(
-                f"Not enough time left in the allowed window: it closes "
-                f"{time_windows.format_local(status.closes_at, spec)}, in "
-                f"{int(remaining)}s, and this experiment needs up to "
-                f"{int(needed)}s of chaos"
-            )
+    def eligibility(self) -> Optional[Mapping[str, Any]]:
+        """The agent-wide eligibility rule, or ``None``."""
+        return self._eligibility_provider() if self._eligibility_provider else None
+
+    def agent_id(self) -> str:
+        return self._agent_id or targets.agent_id()
+
+    def select(
+        self,
+        exp: Mapping[str, Any],
+        sample_key: str = "",
+        kill_switch_reason: Optional[str] = None,
+        busy_reason: Optional[str] = None,
+        report_state: bool = False,
+    ) -> selecting.Selection:
+        """
+        Every selection gate for ``exp`` right now, with the reason for each (see
+        :mod:`src.selection`). Changes nothing; this is what a dry run and the
+        preview endpoint report.
+        """
+        return selecting.evaluate(
+            exp,
+            labels=self.target_labels(),
+            now=self._now(),
+            eligibility=self.eligibility(),
+            agent_id=self.agent_id(),
+            sample_key=sample_key,
+            kill_switch_reason=kill_switch_reason,
+            busy_reason=busy_reason,
+            report_state=report_state,
+        )
+
+    @staticmethod
+    def _enforce(selection: selecting.Selection) -> None:
+        """Raise for the first gate that failed, in the order they are checked."""
+        for gate in selection.failed:
+            if gate.name == "eligibility":
+                raise TargetMismatch(
+                    "This agent is not eligible for chaos: " + gate.detail
+                )
+            if gate.name == "selector":
+                raise TargetMismatch(
+                    "This agent is not a target of the experiment: " + gate.detail
+                )
+            if gate.name == "window":
+                raise OutsideWindow(gate.detail)
+            if gate.name == "sample":
+                raise TargetMismatch(
+                    "This agent is not in the experiment's sample: " + gate.detail
+                )
 
     # -- the run -------------------------------------------------------------------
 
@@ -406,6 +424,7 @@ class ExperimentRunner:
                 dry_run=run.dry_run,
                 hypothesis=run.hypothesis,
                 target_labels=run.target_labels,
+                selection=run.selection,
                 **who,
             )
             self._run_phases(run, exp)
@@ -487,7 +506,19 @@ class ExperimentRunner:
         # The baseline can take a while: make sure we may still go ahead.
         window_closes_at = None
         selector = exp.get("selector")
-        if selector and not run.dry_run:
+        if not run.dry_run:
+            problem = selecting.eligibility_problem(
+                self.eligibility(), self.target_labels()
+            )
+            if problem:
+                self._finish(
+                    run,
+                    RunStatus.REFUSED,
+                    Verdict.INCONCLUSIVE,
+                    "this agent is no longer eligible for chaos, so no chaos was "
+                    "injected: " + problem,
+                )
+                return
             result = targets.match(selector, self.target_labels())
             if not result.matches:
                 self._finish(
@@ -553,8 +584,9 @@ class ExperimentRunner:
     ) -> Callable[[], Optional[str]]:
         """
         A check run while the chaos is going: returns why it must stop now, or
-        ``None``. Covers the time window closing and the target's labels no
-        longer matching (someone removed the label: the remote off switch).
+        ``None``. Covers the time window closing, the agent no longer being
+        eligible, and the target's labels no longer matching the selector
+        (someone removed a label: the remote off switch).
         """
 
         def check() -> Optional[str]:
@@ -562,8 +594,12 @@ class ExperimentRunner:
                 return None
             if window_closes_at is not None and self._now() >= window_closes_at:
                 return "the allowed time window closed"
+            labels = self.target_labels()
+            problem = selecting.eligibility_problem(self.eligibility(), labels)
+            if problem:
+                return "this agent is no longer eligible for chaos: " + problem
             if selector:
-                result = targets.match(selector, self.target_labels())
+                result = targets.match(selector, labels)
                 if not result.matches:
                     return (
                         "the target's labels no longer match the selector: "
@@ -595,6 +631,7 @@ class ExperimentRunner:
             kill_switch_provider=self._ks_provider,
             injector=self._injector,
             max_injections=schedule["max_injections"],
+            max_concurrent=schedule.get("max_concurrent_injections"),
             audit_context={
                 "principal": run.principal,
                 "role": run.role,
