@@ -843,10 +843,12 @@ async def run_experiment(
 
     Refused with 409 while the agent loop, another experiment, or a manual
     injection is running, while the kill switch is holding chaos back, when this
-    agent's labels do not match the experiment's selector, and outside the
-    experiment's allowed time windows (or when its chaos would not finish before
-    the window closes). Dry runs ignore the selector and the windows. Faults
-    that do not fit the resource budget are refused with 422, like a manual
+    agent is not eligible, is not selected by the experiment's selector or its
+    sample, or is outside the experiment's allowed time windows or inside a
+    blackout (or when its chaos would not finish before the window closes). A dry
+    run is not refused for any of those: it runs and records what a real run would
+    have been told (see GET /experiments/{name}/selection to ask without running).
+    Faults that do not fit the resource budget are refused with 422, like a manual
     injection.
     """
     exp = _find_experiment(name)

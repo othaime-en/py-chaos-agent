@@ -121,13 +121,21 @@ def window_gate(experiment: Mapping[str, Any], now: dt.datetime) -> Optional[Gat
         return None
     status = time_windows.evaluate(spec, now)
     if not status.open:
+        opens = time_windows.format_local(status.opens_at, spec)
+        if status.in_blackout:
+            why = f" ({status.blackout})" if status.blackout else ""
+            return Gate(
+                "window",
+                False,
+                f"In a blackout period{why}; the next allowed time opens {opens}",
+            )
         return Gate(
             "window",
             False,
-            "Outside the allowed time window; the next one opens "
-            + time_windows.format_local(status.opens_at, spec),
+            "Outside the allowed time window; the next one opens " + opens,
         )
-    assert status.closes_at is not None
+    if status.closes_at is None:
+        return Gate("window", True, "open, with no closing time ahead")
     needed = chaos_budget_seconds(experiment)
     remaining = (status.closes_at - now).total_seconds()
     closes = time_windows.format_local(status.closes_at, spec)

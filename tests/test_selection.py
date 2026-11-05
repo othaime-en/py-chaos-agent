@@ -135,6 +135,62 @@ class TestWindow:
         assert not gate.ok and "Not enough time left" in gate.detail
 
 
+class TestBlackoutGate:
+    def exp(self, blackouts, **extra):
+        return experiment(
+            windows={"timezone": "UTC", "allow": [], "blackouts": blackouts}, **extra
+        )
+
+    def test_in_a_blackout(self):
+        gate = run(
+            self.exp(
+                [{"from": "2026-11-01", "to": "2026-11-03", "reason": "deploy freeze"}]
+            )
+        ).gate("window")
+        assert not gate.ok
+        assert gate.detail == (
+            "In a blackout period (deploy freeze); "
+            "the next allowed time opens Wed 2026-11-04 00:00 (UTC)"
+        )
+
+    def test_without_a_reason(self):
+        gate = run(
+            self.exp([{"from": "2026-11-01", "to": "2026-11-03", "reason": ""}])
+        ).gate("window")
+        assert gate.detail.startswith(
+            "In a blackout period; the next allowed time opens"
+        )
+
+    def test_open_with_no_closing_time(self):
+        """Every blackout is in the past, so nothing ends it."""
+        gate = run(
+            self.exp([{"from": "2020-01-01", "to": "2020-01-02", "reason": ""}])
+        ).gate("window")
+        assert gate.ok and gate.detail == "open, with no closing time ahead"
+
+    def test_a_distant_blackout_is_when_it_closes(self):
+        gate = run(
+            self.exp([{"from": "2030-01-01", "to": "2030-01-02", "reason": ""}])
+        ).gate("window")
+        assert gate.ok and gate.detail == "open until Tue 2030-01-01 00:00 (UTC)"
+
+    def test_a_blackout_ahead_limits_the_time_left(self):
+        exp = self.exp(
+            [{"from": "2026-11-02", "to": "2026-11-02", "reason": ""}],
+            schedule={
+                "duration_seconds": 600,
+                "interval_seconds": 10,
+                "max_injections": None,
+            },
+        )
+        # Monday is blacked out, so a Sunday-evening start has until midnight.
+        late = evaluate(
+            exp, labels={}, now=dt.datetime(2026, 11, 1, 23, 55, tzinfo=UTC)
+        )
+        gate = late.gate("window")
+        assert not gate.ok and "Not enough time left" in gate.detail
+
+
 class TestSample:
     def test_the_bucket_is_between_0_and_100(self):
         for i in range(200):

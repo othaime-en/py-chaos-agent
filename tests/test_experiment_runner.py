@@ -1223,3 +1223,94 @@ class TestConcurrencyCapInAnExperiment:
         assert wait_for(lambda: {n for n, _ in inj.calls} == {"cpu", "memory"})
         runner.abort()
         finished(runner, run["id"])
+
+
+# ---------------------------------------------------------------------------
+# Blackout periods
+# ---------------------------------------------------------------------------
+
+FREEZE_WINDOWS = {
+    "timezone": "UTC",
+    "allow": [],
+    "blackouts": [
+        {"from": "2026-11-05", "to": "2026-11-06", "reason": "deploy freeze"}
+    ],
+}
+
+
+class TestBlackouts:
+    def exp(self, target, **overrides):
+        return make_experiment(target, windows=FREEZE_WINDOWS, **overrides)
+
+    def test_outside_a_blackout_it_runs(self, runners, target):
+        runner = runners(injector=Injector(), clock=FakeClock("2026-11-02 12:00"))
+        result = run_to_end(runner, self.exp(target))
+        assert result["status"] == "completed"
+        assert result["window_closes_at"] == "2026-11-05T00:00:00Z"
+
+    def test_inside_a_blackout_it_is_refused_with_the_reason(self, runners, target):
+        inj = Injector()
+        runner = runners(injector=inj, clock=FakeClock("2026-11-05 09:00"))
+        with pytest.raises(
+            OutsideWindow,
+            match="blackout period \\(deploy freeze\\).*Sat 2026-11-07 00:00",
+        ):
+            runner.start(self.exp(target))
+        assert runner.history() == [] and inj.calls == [] and target.hits == 0
+
+    def test_the_last_day_is_still_blacked_out(self, runners, target):
+        runner = runners(injector=Injector(), clock=FakeClock("2026-11-06 23:59"))
+        with pytest.raises(OutsideWindow, match="blackout"):
+            runner.start(self.exp(target))
+
+    def test_it_is_refused_when_the_chaos_would_run_into_a_blackout(
+        self, runners, target
+    ):
+        runner = runners(injector=Injector(), clock=FakeClock("2026-11-04 23:59"))
+        exp = self.exp(target, schedule={"duration_seconds": 300})
+        with pytest.raises(OutsideWindow, match="Not enough time left"):
+            runner.start(exp)
+
+    def test_a_dry_run_during_a_blackout_runs_and_says_so(self, runners, target):
+        runner = runners(injector=Injector(), clock=FakeClock("2026-11-05 09:00"))
+        result = run_to_end(runner, self.exp(target), dry_run=True)
+        assert result["status"] == "completed"
+        gate = {g["gate"]: g for g in result["selection"]["gates"]}["window"]
+        assert not gate["ok"] and "blackout period (deploy freeze)" in gate["detail"]
+
+    def test_a_blackout_that_begins_mid_run_stops_it_and_removes_its_effects(
+        self, runners, target
+    ):
+        clock = FakeClock("2026-11-04 12:00")
+        inj = Injector()
+        inj.hold_seconds = 30
+        runner = runners(injector=inj, clock=clock)
+        run = runner.start(
+            self.exp(target, schedule={"duration_seconds": 60, "interval_seconds": 1})
+        )
+        assert wait_for(lambda: lifecycle.is_active("cpu"))
+        clock.set("2026-11-05 00:00")  # the freeze starts
+        result = finished(runner, run["id"])
+        assert result["status"] == "aborted" and result["verdict"] == "inconclusive"
+        assert result["reason"] == "the allowed time window closed"
+        assert inj.cut_short == ["cpu"] and lifecycle.active_types() == []
+
+    def test_with_allow_windows_too(self, runners, target):
+        windows = {
+            "timezone": "UTC",
+            "allow": [
+                {
+                    "days": ["mon", "tue", "wed", "thu", "fri"],
+                    "start": "10:00",
+                    "end": "16:00",
+                }
+            ],
+            "blackouts": [
+                {"from": "2026-11-02", "to": "2026-11-02", "reason": "freeze"}
+            ],
+        }
+        runner = runners(
+            injector=Injector(), clock=FakeClock("2026-11-02 12:00")
+        )  # Monday
+        with pytest.raises(OutsideWindow, match="blackout period \\(freeze\\)"):
+            runner.start(make_experiment(target, windows=windows))
