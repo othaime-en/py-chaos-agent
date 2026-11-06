@@ -1418,14 +1418,13 @@ class TestSloAbort:
         finished(runner, run["id"])
         assert time.monotonic() - started < 8
 
-    def test_after_the_abort_it_still_looks_at_recovery(self, runners, target, prom):
+    def test_after_the_abort_it_still_waits_for_recovery(self, runners, target, prom):
         runner, inj, run = self.start_holding(runners, target, prom)
+        target.script = [503, 503]  # still down for two checks after the chaos is gone
         prom.body = vector(0.5)
         result = finished(runner, run["id"])
-        assert result["recovery"] is not None
-        assert (
-            result["recovery"]["reached"] is True
-        ), "the target is healthy once chaos stops"
+        assert result["recovery"]["reached"] is True, "it gave up instead of waiting"
+        assert result["recovery"]["rounds"] >= 3
         assert result["verdict"] == "falsified", "recovering does not undo a breach"
 
     def test_an_unreachable_prometheus_is_inconclusive_not_falsified(
