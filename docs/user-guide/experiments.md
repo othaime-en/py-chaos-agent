@@ -65,19 +65,17 @@ curl -H "Authorization: Bearer $CHAOS_API_TOKEN" \
 | Verdict | Meaning |
 | --- | --- |
 | `confirmed` | The steady state was restored after the chaos. |
-| `falsified` | It was not restored within `recovery_timeout_seconds`. Worth investigating. |
-| `inconclusive` | The run was cut short (operator abort, kill switch, shutdown), refused, or hit an error. Nothing can be concluded. |
+| `falsified` | The steady state was not restored within `recovery_timeout_seconds`, **or** the run was aborted because an [SLO](#slo-abort) was breached. Worth investigating. |
+| `inconclusive` | The run was cut short by something other than the system (operator abort, kill switch, shutdown, a closing window, a removed label), was refused, hit an error, or an SLO could not be checked. Nothing can be concluded. |
 
 `GET /experiment-runs/{id}` shows the status (`checking_baseline`, `running`,
 `recovering`, `completed`, `aborted`, `refused`, `error`), the verdict, the reason
 for anything other than a clean result, and the last steady-state round before and
 after the chaos with each check's outcome and latency.
 
-!!! note "Not yet: watching during the chaos"
-    The steady state is checked before and after the chaos, not while it runs. A
-    hypothesis like "the service stays healthy during the burst" cannot be
-    verified yet; write it as a recovery claim. Checking during the run, and
-    stopping early on a breach, comes with SLO-based abort.
+The steady state (`steady_state`) is checked **before and after** the chaos. To
+check the system **while** the chaos runs, and stop early if it leaves its limits,
+add an [`slo`](#slo-abort) block.
 
 ## Fields
 
@@ -107,6 +105,11 @@ after the chaos with each check's outcome and latency.
 
 A pass already in progress may finish after a timeout, and one round always runs,
 so a timeout of 0 means "look once".
+
+### `steady_state.checks[]` (type `prometheus`)
+
+Instead of (or as well as) an HTTP check, a check can ask Prometheus. See
+[Prometheus checks](#prometheus-checks) for the fields.
 
 ### `steady_state.checks[]` (type `http`)
 
@@ -471,9 +474,103 @@ return `409`. Two sources of chaos at once would make the result unreadable.
   `source: experiment`, the experiment name and the run id, attributed to the
   person who started it.
 
+## SLO abort
+
+The steady state tells you whether the system came back. An **SLO** is a limit it
+must stay within *while the chaos runs*, and the experiment stops the moment it does
+not. Without one, an experiment injects for its full schedule whatever happens to
+your users.
+
+```yaml
+experiments:
+  - name: cpu-recovery
+    # ...
+    slo:
+      checks:
+        - type: prometheus
+          name: error-rate
+          url: http://prometheus.monitoring:9090
+          query: >
+            sum(rate(http_requests_total{code=~"5.."}[1m]))
+            / sum(rate(http_requests_total[1m]))
+          operator: "<"
+          threshold: 0.01
+        - type: prometheus
+          name: p99-latency
+          url: http://prometheus.monitoring:9090
+          query: >
+            histogram_quantile(0.99,
+              sum(rate(http_request_duration_seconds_bucket[1m])) by (le))
+          operator: "<"
+          threshold: 0.5
+      check_interval_seconds: 5
+      breach_after: 2
+      grace_seconds: 60
+```
+
+| Field | Default | Range | Notes |
+| --- | --- | --- | --- |
+| `checks` | required | 1 to 10 | `http` or `prometheus` checks, names unique. All must pass in a round. |
+| `check_interval_seconds` | 5 | 1 to 60 | Time between rounds. |
+| `breach_after` | 2 | 1 to 20 | Failing rounds **in a row** before it trips. A passing round resets the count, so one noisy sample does not end an experiment. |
+| `grace_seconds` | 0 | 0 to 600 | Wait this long after the chaos starts before the first round. For metrics that need time to show an effect, such as a `rate(...[1m])` window. |
+
+### What happens on a breach
+
+| Situation | Result |
+| --- | --- |
+| A check evaluated and **violated its limit** | The run is aborted: injections are cut short and their effects removed. Status `aborted`, verdict **`falsified`**, reason `SLO breached: error-rate: 0.08 is not < 0.01`. The system did not stay within its limits, which is what the experiment exists to find. |
+| A check **could not be evaluated** (metrics server down, query rejected, no data) | Aborted too, verdict **`inconclusive`**, reason `SLO could not be checked: ...`. Nothing can be concluded about the system, but carrying on without being able to see it is not safe. |
+| Both kinds in one round | A violated limit wins: falsified. |
+
+It is watched for the whole chaos phase, including while the last injections finish
+after the schedule ends. After an SLO abort the chaos is already gone, so the
+agent still waits up to `recovery_timeout_seconds` for the steady state to return and
+records whether it did.
+
+The run's `slo` field shows the rounds so far, the last round's results, and whether
+and how it tripped. It is live while the run is in progress.
+
+**Dry runs** evaluate the SLO checks and record the result, but are never aborted by
+them. A dry run is therefore also the way to prove your queries are right and
+Prometheus is reachable before a real run.
+
+### Prometheus checks
+
+```yaml
+- type: prometheus
+  name: error-rate
+  url: http://prometheus.monitoring:9090
+  query: 'sum(rate(errors_total[1m])) / sum(rate(requests_total[1m]))'
+  operator: "<"
+  threshold: 0.01
+  timeout_seconds: 5
+  on_no_data: fail
+  bearer_token_env: PROM_TOKEN
+```
+
+| Field | Default | Notes |
+| --- | --- | --- |
+| `url` | required | The Prometheus base URL (`/api/v1/query` is added). `http` or `https`, no credentials in the URL. |
+| `query` | required | A PromQL instant query, up to 1000 characters. It must return **one** value: aggregate with `sum()`, `avg()`, `max()` or `histogram_quantile()`. |
+| `operator`, `threshold` | required | The check passes while `value <operator> threshold` (`<`, `<=`, `>`, `>=`). |
+| `timeout_seconds` | 5 | 1 to 30. |
+| `on_no_data` | `fail` | When the query returns nothing (or NaN, as `0/0` does with no traffic): `fail` counts it as *unavailable*, `pass` counts it as passing. |
+| `bearer_token_env` | none | The **name** of an environment variable holding a bearer token. The token itself never goes in the config. |
+
+A query that cannot be answered is *unavailable*, not a breach: the server is down
+or slow, it returned an HTTP error or a malformed or oversized response (over 1 MiB),
+the query was rejected, it returned several series, or the token variable is not
+set. Redirects are not followed. Only the status code or error type is recorded,
+never a server message or the token.
+
+The query runs on a Prometheus you chose in the config, and the API cannot create or
+change experiments, so a caller can only run queries you wrote.
+
 ## Metrics
 
 | Metric | Meaning |
 | --- | --- |
 | `chaos_experiments_total{status,verdict}` | Finished experiments. |
 | `chaos_experiment_active` | 1 while an experiment is running. |
+| `chaos_slo_aborts_total{kind}` | Experiments stopped by their SLO. `kind` is `breach` or `unavailable`. |
