@@ -473,11 +473,10 @@ class TestWindows:
         )
         assert "IANA name" in str(errors_for(raw))
 
-    def test_at_least_one_window(self):
-        assert "experiments.0.windows.allow" in paths(
-            doc(experiment(windows={"allow": []}))
-        )
-        assert "experiments.0.windows.allow" in paths(doc(experiment(windows={})))
+    def test_windows_must_say_something(self):
+        for windows in ({"allow": []}, {}):
+            raw = doc(experiment(windows=windows))
+            assert "needs allow windows or blackouts" in str(errors_for(raw))
 
     def test_too_many_windows(self):
         many = [{"start": "10:00", "end": "11:00"}] * (limits.MAX_TIME_WINDOWS + 1)
@@ -709,3 +708,128 @@ class TestAgentEligibility:
         assert load_config(str(path)).agent.eligibility["match_labels"] == {
             "chaos-enabled": "true"
         }
+
+
+class TestBlackouts:
+    def windows(self, *blackouts, **extra):
+        return {"blackouts": list(blackouts), **extra}
+
+    def valid(self, *blackouts, **extra):
+        out = validate_config_dict(
+            doc(experiment(windows=self.windows(*blackouts, **extra)))
+        )
+        return out["experiments"][0]["windows"]
+
+    def test_blackouts_alone_are_enough(self):
+        out = self.valid(
+            {"from": "2026-12-20", "to": "2027-01-03", "reason": "holiday freeze"}
+        )
+        assert out["allow"] == []
+        assert out["blackouts"] == [
+            {"from": "2026-12-20", "to": "2027-01-03", "reason": "holiday freeze"}
+        ]
+
+    def test_with_allow_windows(self):
+        out = self.valid(
+            {"from": "2026-12-24", "to": "2026-12-24"},
+            allow=[{"start": "10:00", "end": "16:00"}],
+        )
+        assert len(out["allow"]) == 1 and out["blackouts"][0]["reason"] == ""
+
+    def test_the_output_uses_from_and_to(self):
+        out = self.valid({"from": "2026-12-24", "to": "2026-12-24"})
+        assert set(out["blackouts"][0]) == {"from", "to", "reason"}
+
+    def test_unquoted_yaml_dates_work(self):
+        raw = yaml.safe_load("""
+agent: {}
+failures: {}
+experiments:
+  - name: x
+    hypothesis: h
+    steady_state: {checks: [{name: a, url: "http://localhost:1/h"}]}
+    faults: {cpu: {duration_seconds: 5}}
+    schedule: {duration_seconds: 10}
+    windows:
+      blackouts:
+        - from: 2026-12-20
+          to: 2027-01-03
+""")
+        out = validate_config_dict(raw)["experiments"][0]["windows"]["blackouts"][0]
+        assert (out["from"], out["to"]) == ("2026-12-20", "2027-01-03")
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            "2026-02-30",
+            "2026-13-01",
+            "2026-1-5",
+            "12/20/2026",
+            "20261220",
+            "2026-12-20T10:00",
+            "tomorrow",
+            "",
+            20261220,
+        ],
+    )
+    def test_bad_dates(self, bad):
+        raw = doc(experiment(windows=self.windows({"from": bad, "to": "2027-01-03"})))
+        assert errors_for(raw).errors
+
+    def test_to_must_not_be_before_from(self):
+        raw = doc(
+            experiment(windows=self.windows({"from": "2026-12-20", "to": "2026-12-19"}))
+        )
+        assert "must not be before 'from'" in str(errors_for(raw))
+
+    def test_a_blackout_can_be_at_most_a_year(self):
+        self.valid({"from": "2026-01-01", "to": "2026-12-31"})
+        raw = doc(
+            experiment(windows=self.windows({"from": "2026-01-01", "to": "2027-01-02"}))
+        )
+        assert "at most 366 days" in str(errors_for(raw))
+
+    def test_missing_dates(self):
+        raw = doc(experiment(windows=self.windows({"from": "2026-12-20"})))
+        assert "experiments.0.windows.blackouts.0.to" in paths(raw)
+
+    def test_the_reason_is_capped(self):
+        raw = doc(
+            experiment(
+                windows=self.windows(
+                    {"from": "2026-12-20", "to": "2026-12-21", "reason": "x" * 101}
+                )
+            )
+        )
+        assert "experiments.0.windows.blackouts.0.reason" in paths(raw)
+
+    def test_unknown_keys(self):
+        raw = doc(
+            experiment(
+                windows=self.windows(
+                    {"from": "2026-12-20", "to": "2026-12-21", "why": "x"}
+                )
+            )
+        )
+        assert "experiments.0.windows.blackouts.0.why" in paths(raw)
+
+    def test_too_many(self):
+        many = [{"from": "2026-12-20", "to": "2026-12-21"}] * (limits.MAX_BLACKOUTS + 1)
+        assert "experiments.0.windows.blackouts" in paths(
+            doc(experiment(windows={"blackouts": many}))
+        )
+
+    def test_it_loads_through_the_config_file(self, tmp_path):
+        path = tmp_path / "config.yaml"
+        path.write_text(
+            "agent: {}\nfailures: {}\nexperiments:\n"
+            "  - name: x\n    hypothesis: h\n"
+            "    steady_state: {checks: [{name: a, url: 'http://localhost:1/h'}]}\n"
+            "    faults: {cpu: {duration_seconds: 5}}\n    schedule: {duration_seconds: 10}\n"
+            "    windows:\n      blackouts:\n"
+            "        - {from: 2026-12-20, to: 2027-01-03, reason: freeze}\n"
+        )
+        config = load_config(str(path))
+        assert (
+            config.experiments["x"]["windows"]["blackouts"][0]["from"] == "2026-12-20"
+        )

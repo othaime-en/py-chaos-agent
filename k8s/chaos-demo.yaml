@@ -76,6 +76,8 @@ spec:
         app: resilient-app
         # Experiments can select on pod labels (see docs/user-guide/experiments.md).
         env: demo
+        # The label agent.eligibility can require (see config.yaml).
+        chaos-enabled: "true"
     spec:
       shareProcessNamespace: true
       # Pod-wide defaults. Both containers run as unprivileged users (the images

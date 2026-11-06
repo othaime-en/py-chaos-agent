@@ -887,3 +887,57 @@ class TestSampleKeyOnRun:
         response = client.post("/experiments/cpu-spike/run")
         assert response.status_code == 409
         assert "not in the experiment's sample" in response.json()["detail"]
+
+
+class TestBlackoutsInTheApi:
+    FREEZE = {
+        "timezone": "UTC",
+        "allow": [],
+        "blackouts": [
+            {"from": "2026-11-05", "to": "2026-11-06", "reason": "deploy freeze"}
+        ],
+    }
+
+    @pytest.fixture
+    def clock(self, monkeypatch, configured):
+        state = {"now": dt.datetime(2026, 11, 2, 12, 0, tzinfo=dt.timezone.utc)}
+        monkeypatch.setattr("src.windows.utcnow", lambda: state["now"])
+        configured.experiments["cpu-spike"]["windows"] = self.FREEZE
+        return state
+
+    def test_open_before_the_freeze_and_it_says_when_that_ends(self, client, clock):
+        window = client.get("/experiments").json()["experiments"][0]["window"]
+        assert window == {
+            "timezone": "UTC",
+            "open": True,
+            "closes_at": "2026-11-05T00:00:00Z",
+        }
+
+    def test_during_the_freeze_the_reason_is_shown(self, client, clock):
+        clock["now"] = dt.datetime(2026, 11, 5, 9, 0, tzinfo=dt.timezone.utc)
+        window = client.get("/experiments").json()["experiments"][0]["window"]
+        assert window == {
+            "timezone": "UTC",
+            "open": False,
+            "opens_at": "2026-11-07T00:00:00Z",
+            "blackout": "deploy freeze",
+        }
+
+    def test_a_run_during_the_freeze_is_a_409_with_the_reason(self, client, clock):
+        clock["now"] = dt.datetime(2026, 11, 5, 9, 0, tzinfo=dt.timezone.utc)
+        response = client.post("/experiments/cpu-spike/run")
+        assert response.status_code == 409
+        assert "blackout period (deploy freeze)" in response.json()["detail"]
+        assert not agent_state.experiments.is_running
+
+    def test_the_preview_explains_it(self, client, clock):
+        clock["now"] = dt.datetime(2026, 11, 5, 9, 0, tzinfo=dt.timezone.utc)
+        body = client.get("/experiments/cpu-spike/selection").json()
+        assert body["would_run"] is False
+        window = next(g for g in body["gates"] if g["gate"] == "window")
+        assert "blackout period (deploy freeze)" in window["detail"]
+
+    def test_before_the_freeze_it_runs(self, client, clock):
+        response = client.post("/experiments/cpu-spike/run")
+        assert response.status_code == 202
+        wait_finished(client, run_id(response))

@@ -186,3 +186,169 @@ class TestDaylightSaving:
         before = evaluate(self.NY, at("2026-03-07 07:00"))  # 02:00 EST
         after = evaluate(self.NY, at("2026-03-09 06:00"))  # 02:00 EDT
         assert before.open and after.open
+
+
+def blackout(first, last, reason=""):
+    return {"from": first, "to": last, "reason": reason}
+
+
+def freeze(*blackouts, allow=None, timezone="UTC"):
+    spec = {"timezone": timezone, "allow": allow or [], "blackouts": list(blackouts)}
+    return spec
+
+
+# 2026-11-02 is a Monday.
+FREEZE = freeze(blackout("2026-12-20", "2027-01-03", "holiday freeze"))
+
+
+class TestBlackoutsWithoutAllowWindows:
+    def test_any_time_is_open_outside_a_blackout(self):
+        status = evaluate(FREEZE, at("2026-11-02 12:00"))
+        assert status.open
+        assert status.closes_at == at(
+            "2026-12-20 00:00"
+        ), "it closes when the freeze starts"
+
+    def test_with_no_blackout_ahead_nothing_ends_it(self):
+        status = evaluate(FREEZE, at("2027-02-01 12:00"))
+        assert status.open and status.closes_at is None
+        assert status.to_dict() == {"open": True, "closes_at": None}
+
+    def test_inside_a_blackout_it_is_closed_until_the_day_after(self):
+        status = evaluate(FREEZE, at("2026-12-25 12:00"))
+        assert not status.open and status.in_blackout
+        assert status.blackout == "holiday freeze"
+        assert status.opens_at == at("2027-01-04 00:00")
+
+    def test_both_dates_are_inclusive_whole_days(self):
+        assert not evaluate(FREEZE, at("2026-12-20 00:00")).open
+        assert evaluate(FREEZE, at("2026-12-19 23:59")).open
+        assert not evaluate(FREEZE, at("2027-01-03 23:59")).open
+        assert evaluate(FREEZE, at("2027-01-04 00:00")).open
+
+    def test_a_single_day(self):
+        one = freeze(blackout("2026-12-24", "2026-12-24"))
+        assert not evaluate(one, at("2026-12-24 15:00")).open
+        assert evaluate(one, at("2026-12-25 00:00")).open
+
+    def test_the_reason_is_optional(self):
+        spec = freeze(blackout("2026-12-24", "2026-12-24"))
+        status = evaluate(spec, at("2026-12-24 15:00"))
+        assert status.blackout is None
+        assert status.to_dict()["blackout"] == "blackout period"
+
+    def test_serializes_with_the_reason(self):
+        assert evaluate(FREEZE, at("2026-12-25 12:00")).to_dict() == {
+            "open": False,
+            "opens_at": "2027-01-04T00:00:00Z",
+            "blackout": "holiday freeze",
+        }
+
+
+class TestBlackoutsBeatAllowWindows:
+    MON_FRI = [
+        {"days": ["mon", "tue", "wed", "thu", "fri"], "start": "10:00", "end": "16:00"}
+    ]
+
+    def test_a_window_inside_a_blackout_is_closed(self):
+        spec = freeze(blackout("2026-11-02", "2026-11-03"), allow=self.MON_FRI)
+        status = evaluate(spec, at("2026-11-02 12:00"))  # Monday, inside the window
+        assert not status.open and status.in_blackout
+
+    def test_it_reopens_at_the_next_window_not_at_the_blackout_end(self):
+        spec = freeze(blackout("2026-11-02", "2026-11-03"), allow=self.MON_FRI)
+        # The blackout ends Wednesday 00:00, but the window opens at 10:00.
+        status = evaluate(spec, at("2026-11-02 12:00"))
+        assert status.opens_at == at("2026-11-04 10:00")
+
+    def test_a_window_is_cut_short_by_a_blackout_starting_later(self):
+        spec = freeze(
+            blackout("2026-11-03", "2026-11-03"),
+            allow=[
+                {"days": ["mon"], "start": "20:00", "end": "24:00"},
+                {"days": ["tue"], "start": "00:00", "end": "06:00"},
+            ],
+        )
+        # Mon 20:00 -> Tue 06:00 is one window, but Tuesday is blacked out.
+        status = evaluate(spec, at("2026-11-02 21:00"))
+        assert status.open and status.closes_at == at("2026-11-03 00:00")
+
+    def test_the_next_opening_skips_consecutive_blackouts(self):
+        spec = freeze(
+            blackout("2026-11-03", "2026-11-04"),
+            blackout("2026-11-05", "2026-11-06"),
+            allow=self.MON_FRI,
+        )
+        # Tue-Fri are all blacked out, so the next opening is Monday.
+        status = evaluate(spec, at("2026-11-03 12:00"))
+        assert status.opens_at == at("2026-11-09 10:00")
+
+    def test_outside_a_window_and_with_a_blackout_ahead(self):
+        spec = freeze(blackout("2026-11-03", "2026-11-03"), allow=self.MON_FRI)
+        status = evaluate(spec, at("2026-11-02 18:00"))  # Monday evening
+        assert not status.open and not status.in_blackout
+        assert status.opens_at == at("2026-11-04 10:00"), "Tuesday is blacked out"
+
+    def test_no_blackouts_ahead_leaves_a_window_as_before(self):
+        spec = freeze(blackout("2030-01-01", "2030-01-02"), allow=self.MON_FRI)
+        assert evaluate(spec, at("2026-11-02 12:00")).closes_at == at(
+            "2026-11-02 16:00"
+        )
+
+
+class TestBlackoutMerging:
+    def test_overlapping_blackouts_are_one_and_keep_both_reasons(self):
+        spec = freeze(
+            blackout("2026-12-20", "2026-12-26", "holidays"),
+            blackout("2026-12-24", "2026-12-31", "freeze"),
+        )
+        status = evaluate(spec, at("2026-12-25 12:00"))
+        assert status.opens_at == at("2027-01-01 00:00")
+        assert status.blackout == "holidays; freeze"
+
+    def test_touching_blackouts_are_one(self):
+        spec = freeze(
+            blackout("2026-12-20", "2026-12-21"), blackout("2026-12-22", "2026-12-23")
+        )
+        assert evaluate(spec, at("2026-12-21 12:00")).opens_at == at("2026-12-24 00:00")
+
+    def test_unsorted_blackouts(self):
+        spec = freeze(
+            blackout("2027-01-10", "2027-01-12"), blackout("2026-12-20", "2026-12-21")
+        )
+        assert evaluate(spec, at("2026-12-01 12:00")).closes_at == at(
+            "2026-12-20 00:00"
+        )
+
+    def test_a_distant_blackout_does_not_affect_today(self):
+        spec = freeze(blackout("2099-01-01", "2099-01-05"))
+        assert evaluate(spec, at("2026-11-02 12:00")).closes_at == at(
+            "2099-01-01 00:00"
+        )
+
+
+class TestBlackoutTimeZones:
+    DAR = freeze(
+        blackout("2026-12-24", "2026-12-24"), timezone="Africa/Dar_es_Salaam"
+    )  # UTC+3
+
+    def test_the_dates_are_local_days(self):
+        # 2026-12-24 local runs from 2026-12-23 21:00 UTC to 2026-12-24 21:00 UTC.
+        assert not evaluate(self.DAR, at("2026-12-23 21:00")).open
+        assert evaluate(self.DAR, at("2026-12-23 20:59")).open
+        assert not evaluate(self.DAR, at("2026-12-24 20:59")).open
+        assert evaluate(self.DAR, at("2026-12-24 21:00")).open
+
+    def test_the_message_names_the_local_time(self):
+        status = evaluate(self.DAR, at("2026-12-24 06:00"))
+        assert (
+            format_local(status.opens_at, self.DAR)
+            == "Fri 2026-12-25 00:00 (Africa/Dar_es_Salaam)"
+        )
+
+    def test_a_dst_zone_keeps_whole_local_days(self):
+        ny = freeze(blackout("2026-03-08", "2026-03-08"), timezone="America/New_York")
+        status = evaluate(ny, at("2026-03-08 12:00"))
+        assert not status.open
+        # The spring-forward day is 23 hours long: midnight EST to midnight EDT.
+        assert status.opens_at == at("2026-03-09 04:00")

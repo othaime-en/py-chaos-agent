@@ -117,3 +117,8 @@ MIN_DESTINATION_PREFIX_V6 = 48
 # Concurrency inside an experiment (there are only four failure types)
 MIN_CONCURRENT_INJECTIONS = 1
 MAX_CONCURRENT_INJECTIONS = 4
+
+# Blackout periods
+MAX_BLACKOUTS = 50
+MAX_BLACKOUT_DAYS = 366
+MAX_BLACKOUT_REASON_LENGTH = 100

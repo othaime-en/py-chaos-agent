@@ -9,6 +9,13 @@ agent:
   # Dry run mode - if true, logs what would happen without actually doing it
   dry_run: false
 
+  # Opt-in: only run chaos on pods that carry this label, so a pod that forgot it
+  # is safe. Applies to experiments, manual injections and the loop. Labels come
+  # from CHAOS_TARGET_LABELS or CHAOS_TARGET_LABELS_FILE. Dry runs are not gated.
+  # eligibility:
+  #   match_labels:
+  #     chaos-enabled: "true"
+
   # API mode only: start injecting as soon as the API server starts. When false
   # (the default), nothing is injected until you call POST /agent/start. The
   # standalone agent (python -m src.agent) always starts immediately.
@@ -185,6 +192,17 @@ experiments:
     #     - days: [mon, tue, wed, thu]
     #       start: "10:00"
     #       end: "16:00"
+    #   blackouts:
+    #     - from: 2026-12-20
+    #       to: 2027-01-03
+    #       reason: holiday freeze
+    # Optional: of the agents that match, only this share runs it. Stable per
+    # agent; pass a new sample_key when you run it to draw a new share. Put it in
+    # the selector above (with or without labels):
+    #   selector:
+    #     sample_percent: 10
+    # Optional: at most this many faults at once. Add to schedule above:
+    #   max_concurrent_injections: 1
 
 # Example configurations for different environments:
 

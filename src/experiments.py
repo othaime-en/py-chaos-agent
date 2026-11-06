@@ -27,9 +27,13 @@ and is aborted if they stop matching mid-run. Removing the label from the pod is
 therefore a remote off switch.
 
 If the experiment has time windows (see ``src.windows``) it will not start
-outside them, or when the window will close before its chaos could finish, and a
-run whose window closes mid-way is aborted. Dry runs are exempt: they change
-nothing.
+outside them or inside a blackout, or when the window will close before its chaos
+could finish, and a run whose window closes mid-way is aborted.
+
+Whether this agent may run an experiment at all is decided by ``src.selection``:
+the agent-wide opt-in, the selector, the windows and the sample, in that order.
+A dry run is never refused for any of them. It runs, and its ``selection`` records
+what a real run would have been told.
 
 Only one experiment runs at a time, and the API refuses to start one while the
 agent loop is running (and the other way round), so two sources of chaos can never

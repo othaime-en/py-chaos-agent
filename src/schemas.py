@@ -17,6 +17,7 @@ Rules, applied uniformly:
   a ``KeyError`` mid-injection.
 """
 
+import datetime
 import ipaddress
 import re
 from urllib.parse import urlparse
@@ -673,11 +674,74 @@ class TimeWindow(_StrictModel):
         return self
 
 
+class Blackout(_StrictModel):
+    """
+    A period when the experiment must not run, whatever the windows say: a deploy
+    freeze, a sale, a holiday. ``from`` and ``to`` are dates, both inclusive, whole
+    days in the windows' time zone.
+    """
+
+    model_config = ConfigDict(extra="forbid", strict=True, populate_by_name=True)
+
+    from_: str = Field(alias="from")
+    to: str
+    reason: str = Field(default="", max_length=limits.MAX_BLACKOUT_REASON_LENGTH)
+
+    @field_validator("from_", "to", mode="before")
+    @classmethod
+    def _yaml_dates(cls, value: Any) -> Any:
+        # An unquoted 2026-12-20 in YAML arrives as a date, not a string.
+        if isinstance(value, datetime.date) and not isinstance(
+            value, datetime.datetime
+        ):
+            return value.isoformat()
+        return value
+
+    @field_validator("from_", "to")
+    @classmethod
+    def _real_date(cls, value: str) -> str:
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+            raise ValueError("must be a date written YYYY-MM-DD")
+        try:
+            datetime.date.fromisoformat(value)
+        except ValueError:
+            raise ValueError(f"'{value}' is not a real date") from None
+        return value
+
+    @model_validator(mode="after")
+    def _ordered_and_bounded(self) -> "Blackout":
+        first = datetime.date.fromisoformat(self.from_)
+        last = datetime.date.fromisoformat(self.to)
+        if last < first:
+            raise ValueError("'to' must not be before 'from'")
+        if (last - first).days + 1 > limits.MAX_BLACKOUT_DAYS:
+            raise ValueError(
+                f"a blackout can last at most {limits.MAX_BLACKOUT_DAYS} days; "
+                "use several"
+            )
+        return self
+
+
 class ExperimentWindows(_StrictModel):
-    """When an experiment may run. Outside every window it will not start."""
+    """
+    When an experiment may run. Outside every ``allow`` window, or inside a
+    blackout, it will not start. Without ``allow`` it may run at any time except
+    during a blackout.
+    """
 
     timezone: str = "UTC"
-    allow: List[TimeWindow] = Field(min_length=1, max_length=limits.MAX_TIME_WINDOWS)
+    allow: List[TimeWindow] = Field(
+        default_factory=list, max_length=limits.MAX_TIME_WINDOWS
+    )
+    blackouts: List[Blackout] = Field(
+        default_factory=list, max_length=limits.MAX_BLACKOUTS
+    )
+
+    @model_validator(mode="after")
+    def _says_something(self) -> "ExperimentWindows":
+        if not self.allow and not self.blackouts:
+            raise ValueError("windows needs allow windows or blackouts")
+        return self
 
     @field_validator("timezone")
     @classmethod
@@ -725,7 +789,7 @@ class ExperimentConfig(_StrictModel):
 
     def to_dict(self) -> Dict[str, Any]:
         """Plain dict with defaults filled in; only the faults actually used."""
-        data = self.model_dump(exclude={"faults"})
+        data = self.model_dump(exclude={"faults"}, by_alias=True)
         data["faults"] = {
             name: getattr(self.faults, name).model_dump()
             for name in FAILURE_TYPES
