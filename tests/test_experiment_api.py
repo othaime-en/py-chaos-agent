@@ -941,3 +941,71 @@ class TestBlackoutsInTheApi:
         response = client.post("/experiments/cpu-spike/run")
         assert response.status_code == 202
         wait_finished(client, run_id(response))
+
+
+class TestSloThroughTheApi:
+    @pytest.fixture
+    def prom(self):
+        from tests.fake_prometheus import FakePrometheus, vector
+
+        p = FakePrometheus(vector(0.001))
+        yield p
+        p.close()
+
+    @pytest.fixture
+    def with_slo(self, configured, prom):
+        configured.experiments["cpu-spike"]["slo"] = {
+            "checks": [
+                {
+                    "type": "prometheus",
+                    "name": "error-rate",
+                    "url": prom.url,
+                    "query": "sum(rate(errors_total[1m]))",
+                    "operator": "<",
+                    "threshold": 0.01,
+                    "timeout_seconds": 2,
+                    "on_no_data": "fail",
+                    "bearer_token_env": None,
+                }
+            ],
+            "check_interval_seconds": 0.05,
+            "breach_after": 2,
+            "grace_seconds": 0,
+        }
+        return configured
+
+    def test_the_experiment_view_shows_the_slo(self, client, with_slo):
+        body = client.get("/experiments/cpu-spike").json()
+        assert body["slo"]["checks"][0]["name"] == "error-rate"
+        assert body["slo"]["breach_after"] == 2
+
+    def test_a_healthy_run_reports_its_slo_rounds(self, client, with_slo):
+        response = client.post("/experiments/cpu-spike/run")
+        assert response.status_code == 202
+        result = wait_finished(client, run_id(response))
+        assert result["status"] == "completed"
+        assert result["slo"]["rounds"] >= 1 and result["slo"]["breached"] is False
+
+    def test_a_breach_aborts_and_falsifies(self, client, with_slo, prom, injector):
+        from tests.fake_prometheus import vector
+
+        rid = hold_experiment(client, injector)
+        prom.body = vector(0.5)
+        result = wait_finished(client, rid, timeout=10)
+        assert result["status"] == "aborted" and result["verdict"] == "falsified"
+        assert result["reason"].startswith("SLO breached: error-rate")
+        assert wait_for(lambda: lifecycle.active_types() == [])
+
+    def test_a_dry_run_reports_without_aborting(self, client, with_slo, prom):
+        from tests.fake_prometheus import vector
+
+        prom.body = vector(0.9)
+        response = client.post("/experiments/cpu-spike/run", json={"dry_run": True})
+        result = wait_finished(client, run_id(response))
+        assert result["status"] == "completed"
+        assert result["slo"]["breached"] is True
+
+    def test_a_run_without_an_slo_has_none(self, client, configured):
+        response = client.post("/experiments/other/run")
+        result = wait_finished(client, run_id(response))
+        assert result["slo"] is None

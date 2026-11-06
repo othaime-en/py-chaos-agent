@@ -203,6 +203,17 @@ experiments:
     #     sample_percent: 10
     # Optional: at most this many faults at once. Add to schedule above:
     #   max_concurrent_injections: 1
+    # Optional: limits to stay within WHILE the chaos runs. Abort when breached.
+    # slo:
+    #   checks:
+    #     - type: prometheus
+    #       name: error-rate
+    #       url: http://prometheus:9090
+    #       query: 'sum(rate(errors_total[1m])) / sum(rate(requests_total[1m]))'
+    #       operator: "<"
+    #       threshold: 0.01
+    #   check_interval_seconds: 5
+    #   breach_after: 2
 
 # Example configurations for different environments:
 

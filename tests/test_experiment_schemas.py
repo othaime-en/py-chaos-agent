@@ -263,7 +263,7 @@ class TestSteadyState:
     )
     def test_bad_urls(self, url):
         raw = doc(experiment(steady_state={"checks": [{**CHECK, "url": url}]}))
-        assert "experiments.0.steady_state.checks.0.url" in paths(raw)
+        assert "experiments.0.steady_state.checks.0.http.url" in paths(raw)
 
     def test_https_is_fine(self):
         check = {**CHECK, "url": "https://app.internal:8443/healthz"}
@@ -273,7 +273,7 @@ class TestSteadyState:
     def test_expected_status_must_be_a_real_status(self, status):
         check = {**CHECK, "expected_status": status}
         raw = doc(experiment(steady_state={"checks": [check]}))
-        assert "experiments.0.steady_state.checks.0.expected_status" in paths(raw)
+        assert "experiments.0.steady_state.checks.0.http.expected_status" in paths(raw)
 
     def test_latency_limit_cannot_exceed_the_timeout(self):
         check = {**CHECK, "timeout_seconds": 2, "max_latency_ms": 2001}
@@ -283,9 +283,9 @@ class TestSteadyState:
         validate_config_dict(doc(experiment(steady_state={"checks": [check]})))
 
     def test_unknown_check_types_are_rejected(self):
-        check = {**CHECK, "type": "prometheus"}
+        check = {**CHECK, "type": "nope"}
         raw = doc(experiment(steady_state={"checks": [check]}))
-        assert "experiments.0.steady_state.checks.0.type" in paths(raw)
+        assert "use 'http' or 'prometheus'" in str(errors_for(raw))
 
     @pytest.mark.parametrize(
         "field, low, high",
@@ -833,3 +833,177 @@ experiments:
         assert (
             config.experiments["x"]["windows"]["blackouts"][0]["from"] == "2026-12-20"
         )
+
+
+PROM = {
+    "type": "prometheus",
+    "name": "error-rate",
+    "url": "http://prometheus:9090",
+    "query": "sum(rate(errors_total[1m])) / sum(rate(requests_total[1m]))",
+    "operator": "<",
+    "threshold": 0.01,
+}
+
+
+class TestPrometheusCheck:
+    def check(self, **overrides):
+        out = validate_config_dict(
+            doc(experiment(steady_state={"checks": [{**PROM, **overrides}]}))
+        )
+        return out["experiments"][0]["steady_state"]["checks"][0]
+
+    def bad(self, **overrides):
+        raw = doc(experiment(steady_state={"checks": [{**PROM, **overrides}]}))
+        return paths(raw)
+
+    def test_defaults(self):
+        c = self.check()
+        assert c["timeout_seconds"] == 5
+        assert c["on_no_data"] == "fail"
+        assert c["bearer_token_env"] is None
+        assert c["type"] == "prometheus"
+
+    def test_the_original_form_without_a_type_is_still_http(self):
+        out = validate_config_dict(doc(experiment()))
+        assert out["experiments"][0]["steady_state"]["checks"][0]["type"] == "http"
+
+    def test_both_kinds_can_be_mixed(self):
+        out = validate_config_dict(
+            doc(experiment(steady_state={"checks": [CHECK, PROM]}))
+        )
+        kinds = [c["type"] for c in out["experiments"][0]["steady_state"]["checks"]]
+        assert kinds == ["http", "prometheus"]
+
+    @pytest.mark.parametrize("op", ["<", "<=", ">", ">="])
+    def test_operators(self, op):
+        assert self.check(operator=op)["operator"] == op
+
+    @pytest.mark.parametrize("op", ["==", "!=", "lt", "", "=>"])
+    def test_bad_operators(self, op):
+        assert "experiments.0.steady_state.checks.0.prometheus.operator" in self.bad(
+            operator=op
+        )
+
+    @pytest.mark.parametrize("value", [0, 1, 0.01, -5, 1e6])
+    def test_thresholds(self, value):
+        assert self.check(threshold=value)["threshold"] == value
+
+    @pytest.mark.parametrize("value", [float("nan"), float("inf"), "1", None, True])
+    def test_bad_thresholds(self, value):
+        assert "experiments.0.steady_state.checks.0.prometheus.threshold" in self.bad(
+            threshold=value
+        )
+
+    @pytest.mark.parametrize("query", ["", "   ", "up\x00", "x" * 1001])
+    def test_bad_queries(self, query):
+        assert "experiments.0.steady_state.checks.0.prometheus.query" in self.bad(
+            query=query
+        )
+
+    def test_multiline_queries_are_fine(self):
+        assert "\n" in self.check(query="sum(\n  rate(x[1m])\n)")["query"]
+
+    @pytest.mark.parametrize(
+        "url", ["ftp://p", "http://", "p:9090", "http://u:p@p:9090"]
+    )
+    def test_bad_urls(self, url):
+        assert "experiments.0.steady_state.checks.0.prometheus.url" in self.bad(url=url)
+
+    def test_the_token_is_an_environment_variable_name_not_a_token(self):
+        assert (
+            self.check(bearer_token_env="PROM_TOKEN")["bearer_token_env"]
+            == "PROM_TOKEN"
+        )
+        for bad in ("prom_token", "has space", "secret-token-value", "1ABC", "A" * 65):
+            assert (
+                "experiments.0.steady_state.checks.0.prometheus.bearer_token_env"
+                in self.bad(bearer_token_env=bad)
+            )
+
+    def test_no_data_choices(self):
+        assert self.check(on_no_data="pass")["on_no_data"] == "pass"
+        assert "experiments.0.steady_state.checks.0.prometheus.on_no_data" in self.bad(
+            on_no_data="ignore"
+        )
+
+    def test_timeout_bounds(self):
+        self.check(timeout_seconds=1)
+        self.check(timeout_seconds=30)
+        assert self.bad(timeout_seconds=0) and self.bad(timeout_seconds=31)
+
+    def test_names_must_be_unique_across_kinds(self):
+        raw = doc(
+            experiment(
+                steady_state={"checks": [{**CHECK, "name": "x"}, {**PROM, "name": "x"}]}
+            )
+        )
+        assert "duplicate check name 'x'" in str(errors_for(raw))
+
+    def test_http_only_fields_are_rejected_on_a_prometheus_check(self):
+        assert self.bad(expected_status=200)
+
+
+class TestSlo:
+    SLO = {"checks": [PROM]}
+
+    def slo(self, **overrides):
+        out = validate_config_dict(doc(experiment(slo={**self.SLO, **overrides})))
+        return out["experiments"][0]["slo"]
+
+    def bad(self, **overrides):
+        return paths(doc(experiment(slo={**self.SLO, **overrides})))
+
+    def test_off_by_default(self):
+        assert validate_config_dict(doc(experiment()))["experiments"][0]["slo"] is None
+
+    def test_defaults(self):
+        out = self.slo()
+        assert out["check_interval_seconds"] == 5
+        assert out["breach_after"] == 2
+        assert out["grace_seconds"] == 0
+        assert out["checks"][0]["name"] == "error-rate"
+
+    def test_it_takes_http_checks_too(self):
+        out = self.slo(checks=[CHECK, PROM])
+        assert [c["type"] for c in out["checks"]] == ["http", "prometheus"]
+
+    def test_at_least_one_check_and_at_most_ten(self):
+        assert "experiments.0.slo.checks" in self.bad(checks=[])
+        many = [{**CHECK, "name": f"c{i}"} for i in range(limits.MAX_SLO_CHECKS + 1)]
+        assert "experiments.0.slo.checks" in self.bad(checks=many)
+
+    def test_check_names_must_be_unique(self):
+        assert "duplicate check name" in str(
+            errors_for(doc(experiment(slo={"checks": [PROM, PROM]})))
+        )
+
+    @pytest.mark.parametrize(
+        "field, low, high",
+        [
+            (
+                "check_interval_seconds",
+                limits.MIN_SLO_INTERVAL_SECONDS,
+                limits.MAX_SLO_INTERVAL_SECONDS,
+            ),
+            ("breach_after", limits.MIN_SLO_BREACH_AFTER, limits.MAX_SLO_BREACH_AFTER),
+            (
+                "grace_seconds",
+                limits.MIN_SLO_GRACE_SECONDS,
+                limits.MAX_SLO_GRACE_SECONDS,
+            ),
+        ],
+    )
+    def test_bounds(self, field, low, high):
+        self.slo(**{field: low})
+        self.slo(**{field: high})
+        assert f"experiments.0.slo.{field}" in self.bad(**{field: low - 1})
+        assert f"experiments.0.slo.{field}" in self.bad(**{field: high + 1})
+
+    def test_unknown_keys(self):
+        assert "experiments.0.slo.breach" in self.bad(breach=3)
+
+    def test_its_names_are_independent_of_the_steady_state(self):
+        out = validate_config_dict(
+            doc(experiment(steady_state={"checks": [CHECK]}, slo={"checks": [CHECK]}))
+        )
+        assert out["experiments"][0]["slo"]["checks"][0]["name"] == "health"
