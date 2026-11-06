@@ -173,6 +173,11 @@ experiments:
       duration_seconds: 60
       interval_seconds: 15
       max_injections: 3
+    # Optional: only run on agents whose labels match (CHAOS_TARGET_LABELS or
+    # CHAOS_TARGET_LABELS_FILE). Elsewhere the API refuses.
+    # selector:
+    #   match_labels:
+    #     env: staging
     # Optional: only allow runs in these windows (outside them the API refuses).
     # windows:
     #   timezone: UTC

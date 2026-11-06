@@ -488,3 +488,115 @@ class TestWindows:
         window = {"start": "10:00", "end": "11:00", "weekday": "mon"}
         raw = doc(experiment(windows=self.windows(window)))
         assert "experiments.0.windows.allow.0.weekday" in paths(raw)
+
+
+class TestSelector:
+    def valid(self, selector):
+        out = validate_config_dict(doc(experiment(selector=selector)))
+        return out["experiments"][0]["selector"]
+
+    def bad(self, selector):
+        return paths(doc(experiment(selector=selector)))
+
+    def test_selectors_are_optional_and_off_by_default(self):
+        out = validate_config_dict(doc(experiment()))["experiments"][0]
+        assert out["selector"] is None
+
+    def test_match_labels(self):
+        out = self.valid(
+            {"match_labels": {"env": "staging", "app.kubernetes.io/name": "checkout"}}
+        )
+        assert out["match_labels"] == {
+            "env": "staging",
+            "app.kubernetes.io/name": "checkout",
+        }
+        assert out["match_expressions"] == []
+
+    def test_expressions(self):
+        out = self.valid(
+            {
+                "match_expressions": [
+                    {"key": "tier", "operator": "In", "values": ["canary", "preview"]},
+                    {"key": "chaos-optout", "operator": "DoesNotExist"},
+                ]
+            }
+        )
+        assert out["match_expressions"][1] == {
+            "key": "chaos-optout",
+            "operator": "DoesNotExist",
+            "values": [],
+        }
+
+    def test_both_together(self):
+        self.valid(
+            {
+                "match_labels": {"env": "staging"},
+                "match_expressions": [{"key": "chaos-ok", "operator": "Exists"}],
+            }
+        )
+
+    @pytest.mark.parametrize(
+        "selector", [{}, {"match_labels": {}}, {"match_expressions": []}]
+    )
+    def test_an_empty_selector_is_rejected(self, selector):
+        raw = doc(experiment(selector=selector))
+        assert "would match every agent" in str(errors_for(raw))
+
+    @pytest.mark.parametrize("key", ["bad key", "-x", "", "a/b/c", "x" * 64])
+    def test_bad_label_keys(self, key):
+        assert "experiments.0.selector.match_labels" in self.bad(
+            {"match_labels": {key: "v"}}
+        )
+
+    @pytest.mark.parametrize("value", ["bad value", "-x", "x" * 64, "a,b"])
+    def test_bad_label_values(self, value):
+        assert "experiments.0.selector.match_labels" in self.bad(
+            {"match_labels": {"k": value}}
+        )
+
+    def test_label_values_must_be_strings(self):
+        assert errors_for(doc(experiment(selector={"match_labels": {"k": 1}}))).errors
+
+    @pytest.mark.parametrize(
+        "expr",
+        [
+            {"key": "a", "operator": "In"},
+            {"key": "a", "operator": "NotIn", "values": []},
+            {"key": "a", "operator": "Exists", "values": ["x"]},
+            {"key": "a", "operator": "DoesNotExist", "values": ["x"]},
+        ],
+    )
+    def test_operator_and_values_must_agree(self, expr):
+        raw = doc(experiment(selector={"match_expressions": [expr]}))
+        assert errors_for(raw).errors
+
+    def test_unknown_operator(self):
+        expr = {"key": "a", "operator": "Equals", "values": ["x"]}
+        assert "experiments.0.selector.match_expressions.0.operator" in self.bad(
+            {"match_expressions": [expr]}
+        )
+
+    def test_a_bad_expression_key_or_value_points_at_it(self):
+        expr = {"key": "bad key", "operator": "In", "values": ["ok"]}
+        assert "experiments.0.selector.match_expressions.0.key" in self.bad(
+            {"match_expressions": [expr]}
+        )
+        expr = {"key": "ok", "operator": "In", "values": ["bad value"]}
+        assert "experiments.0.selector.match_expressions.0.values" in self.bad(
+            {"match_expressions": [expr]}
+        )
+
+    def test_limits(self):
+        many = {f"k{i}": "v" for i in range(21)}
+        assert "experiments.0.selector.match_labels" in self.bad({"match_labels": many})
+        exprs = [{"key": f"k{i}", "operator": "Exists"} for i in range(21)]
+        assert "experiments.0.selector.match_expressions" in self.bad(
+            {"match_expressions": exprs}
+        )
+        values = {"key": "a", "operator": "In", "values": ["v"] * 21}
+        assert errors_for(
+            doc(experiment(selector={"match_expressions": [values]}))
+        ).errors
+
+    def test_unknown_keys(self):
+        assert "experiments.0.selector.labels" in self.bad({"labels": {"a": "b"}})

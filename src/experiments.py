@@ -21,6 +21,11 @@ What this does not do yet: the steady state is checked before and after the chao
 not while it runs. Watching it during the run, and stopping early when it is
 breached, is the job of the SLO abort feature.
 
+If the experiment has a target selector (see ``src.targets``) it only runs on an
+agent whose labels match, is refused if they stop matching during the baseline,
+and is aborted if they stop matching mid-run. Removing the label from the pod is
+therefore a remote off switch.
+
 If the experiment has time windows (see ``src.windows``) it will not start
 outside them, or when the window will close before its chaos could finish, and a
 run whose window closes mid-way is aborted. Dry runs are exempt: they change
@@ -47,6 +52,7 @@ from .kill_switch import KillSwitch
 from .lifecycle import lifecycle
 from .logging_config import get_logger
 from .metrics import EXPERIMENT_ACTIVE, EXPERIMENTS_TOTAL
+from . import targets
 from . import windows as time_windows
 from .steady_state import SteadyStateResult, wait_for_steady_state
 
@@ -62,6 +68,10 @@ _ABORT_TIMEOUT_SECONDS = 10.0
 
 class ExperimentBusy(RuntimeError):
     """An experiment is already running."""
+
+
+class TargetMismatch(RuntimeError):
+    """The experiment's selector does not match this agent's labels."""
 
 
 class OutsideWindow(RuntimeError):
@@ -137,6 +147,7 @@ class ExperimentRun:
     finished_at: Optional[float] = None
     injections_started: int = 0
     window_closes_at: Optional[dt.datetime] = None
+    target_labels: Optional[Dict[str, str]] = None
     baseline: Optional[SteadyStateResult] = None
     recovery: Optional[SteadyStateResult] = None
 
@@ -165,6 +176,9 @@ class ExperimentRun:
             "duration_seconds": duration,
             "injections_started": self.injections_started,
             "window_closes_at": time_windows.iso(self.window_closes_at),
+            "target_labels": (
+                dict(self.target_labels) if self.target_labels is not None else None
+            ),
             "baseline": self.baseline.to_dict() if self.baseline else None,
             "recovery": self.recovery.to_dict() if self.recovery else None,
         }
@@ -183,6 +197,8 @@ class ExperimentRunner:
         history_size: How many runs (running and finished) to remember.
         clock: Returns the current time (timezone-aware) for the time windows.
             Defaults to the real clock. Injectable for tests.
+        labels_provider: Returns this agent's labels for target selectors.
+            Defaults to the labels from the environment (``src.targets``).
     """
 
     def __init__(
@@ -191,10 +207,12 @@ class ExperimentRunner:
         injector: Optional[Callable[[str, Mapping[str, Any], bool], None]] = None,
         history_size: int = HISTORY_SIZE,
         clock: Optional[Callable[[], dt.datetime]] = None,
+        labels_provider: Optional[Callable[[], Mapping[str, str]]] = None,
     ) -> None:
         self._ks_provider = kill_switch_provider or (lambda: None)
         self._injector = injector
         self._clock = clock
+        self._labels_provider = labels_provider
         self._lock = threading.RLock()
         self._history: Deque[ExperimentRun] = deque(maxlen=history_size)
         self._current: Optional[ExperimentRun] = None
@@ -242,9 +260,11 @@ class ExperimentRunner:
         Start ``experiment`` (a validated experiment dict) and return the new run.
 
         ``dry_run`` overrides the experiment's own setting when given. Raises
-        :class:`ExperimentBusy` if another experiment is running, and
-        :class:`OutsideWindow` if its time windows are closed or too short for
-        it. A dry run changes nothing, so the windows do not apply to it.
+        :class:`ExperimentBusy` if another experiment is running,
+        :class:`TargetMismatch` if its selector does not match this agent's
+        labels, and :class:`OutsideWindow` if its time windows are closed or too
+        short for it. A dry run changes nothing, so neither the selector nor the
+        windows apply to it.
         """
         # A private copy: a config reload while the experiment runs must not
         # change it halfway.
@@ -256,6 +276,7 @@ class ExperimentRunner:
                     f"Experiment '{self._current.experiment}' is already running"
                 )
             if not effective_dry_run:
+                self._check_target(exp)
                 self._check_window(exp)
             run = ExperimentRun(
                 id=uuid.uuid4().hex[:12],
@@ -265,6 +286,11 @@ class ExperimentRunner:
                 principal=principal,
                 role=role,
                 created_at=time.time(),
+                target_labels=(
+                    dict(self.target_labels())
+                    if exp.get("selector") and not effective_dry_run
+                    else None
+                ),
             )
             self._cancel.clear()
             self._abort_reason = "aborted"
@@ -310,7 +336,21 @@ class ExperimentRunner:
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout)
 
-    # -- time windows ----------------------------------------------------------------
+    # -- where and when ------------------------------------------------------------
+
+    def target_labels(self) -> Dict[str, str]:
+        """This agent's labels right now."""
+        if self._labels_provider is not None:
+            return dict(self._labels_provider())
+        return targets.agent_labels.get()
+
+    def _check_target(self, exp: Mapping[str, Any]) -> None:
+        """Raise TargetMismatch unless this agent is one the experiment selects."""
+        result = targets.match(exp.get("selector"), self.target_labels())
+        if not result.matches:
+            raise TargetMismatch(
+                "This agent is not a target of the experiment: " + result.summary
+            )
 
     def _now(self) -> dt.datetime:
         return self._clock() if self._clock else time_windows.utcnow()
@@ -365,6 +405,7 @@ class ExperimentRunner:
                 run_id=run.id,
                 dry_run=run.dry_run,
                 hypothesis=run.hypothesis,
+                target_labels=run.target_labels,
                 **who,
             )
             self._run_phases(run, exp)
@@ -443,8 +484,20 @@ class ExperimentRunner:
             )
             return
 
-        # The baseline can take a while: make sure the window is still open now.
+        # The baseline can take a while: make sure we may still go ahead.
         window_closes_at = None
+        selector = exp.get("selector")
+        if selector and not run.dry_run:
+            result = targets.match(selector, self.target_labels())
+            if not result.matches:
+                self._finish(
+                    run,
+                    RunStatus.REFUSED,
+                    Verdict.INCONCLUSIVE,
+                    "the target's labels no longer match the selector, so no "
+                    "chaos was injected: " + result.summary,
+                )
+                return
         spec = exp.get("windows")
         if spec and not run.dry_run:
             status = time_windows.evaluate(spec, self._now())
@@ -461,7 +514,8 @@ class ExperimentRunner:
 
         # 2. Chaos
         self._update(run, status=RunStatus.RUNNING)
-        abort_reason = self._inject(run, exp, window_closes_at)
+        guard = self._guard(selector, window_closes_at, run.dry_run)
+        abort_reason = self._inject(run, exp, guard)
         if self._shutting_down or lifecycle.is_shutting_down():
             self._finish(
                 run, RunStatus.ABORTED, Verdict.INCONCLUSIVE, abort_reason or "shutdown"
@@ -491,11 +545,39 @@ class ExperimentRunner:
                 f"{steady_state['recovery_timeout_seconds']}s of the chaos ending",
             )
 
+    def _guard(
+        self,
+        selector: Optional[Mapping[str, Any]],
+        window_closes_at: Optional[dt.datetime],
+        dry_run: bool,
+    ) -> Callable[[], Optional[str]]:
+        """
+        A check run while the chaos is going: returns why it must stop now, or
+        ``None``. Covers the time window closing and the target's labels no
+        longer matching (someone removed the label: the remote off switch).
+        """
+
+        def check() -> Optional[str]:
+            if dry_run:
+                return None
+            if window_closes_at is not None and self._now() >= window_closes_at:
+                return "the allowed time window closed"
+            if selector:
+                result = targets.match(selector, self.target_labels())
+                if not result.matches:
+                    return (
+                        "the target's labels no longer match the selector: "
+                        + result.summary
+                    )
+            return None
+
+        return check
+
     def _inject(
         self,
         run: ExperimentRun,
         exp: Dict[str, Any],
-        window_closes_at: Optional[dt.datetime] = None,
+        guard: Optional[Callable[[], Optional[str]]] = None,
     ) -> Optional[str]:
         """
         Run the chaos phase. Returns why it was cut short, or ``None`` if it ran
@@ -524,19 +606,28 @@ class ExperimentRunner:
         )
         engine.start()
         try:
-            abort_reason = self._hold(
-                engine, schedule["duration_seconds"], run.dry_run, window_closes_at
+            # Keep watching the whole time, including after the schedule ends while
+            # the last injections finish: an abort, the kill switch, a closing
+            # window or a removed label must stop the chaos then too.
+            deadline = time.monotonic() + schedule["duration_seconds"]
+            abort_reason = self._watch(
+                lambda: not engine.is_running or time.monotonic() >= deadline,
+                run.dry_run,
+                guard,
             )
             if abort_reason is None:
+                engine.halt()
                 longest = max(
                     (f.get("duration_seconds", 0) for f in faults.values()), default=0
                 )
-                clean = engine.stop(
-                    timeout=longest + _FINISH_GRACE_SECONDS,
-                    reason="experiment finished",
-                    abort_running=False,
+                drain_deadline = time.monotonic() + longest + _FINISH_GRACE_SECONDS
+                abort_reason = self._watch(
+                    lambda: (not engine.is_running and engine.in_flight() == 0)
+                    or time.monotonic() >= drain_deadline,
+                    run.dry_run,
+                    guard,
                 )
-                if not clean:
+                if abort_reason is None and (engine.is_running or engine.in_flight()):
                     abort_reason = "injections did not finish in time and were aborted"
             if abort_reason is not None:
                 engine.stop(timeout=_ABORT_TIMEOUT_SECONDS, reason=abort_reason)
@@ -547,27 +638,31 @@ class ExperimentRunner:
             self._update(run, injections_started=engine.injections_started)
         return abort_reason
 
-    def _hold(
+    def _watch(
         self,
-        engine: ChaosEngine,
-        duration: float,
+        done: Callable[[], bool],
         dry_run: bool,
-        window_closes_at: Optional[dt.datetime] = None,
+        guard: Optional[Callable[[], Optional[str]]] = None,
     ) -> Optional[str]:
-        """Wait until the chaos phase should end. Returns an abort reason or None."""
-        deadline = time.monotonic() + duration
+        """
+        Wait until ``done()``, watching for reasons to stop early. Returns that
+        reason (an abort, shutdown, a guard such as the window or labels, or the
+        kill switch), or ``None`` if ``done()`` came first.
+        """
         while True:
             if self._cancel.is_set():
                 return self._abort_reason
             if lifecycle.is_shutting_down():
                 return "agent shutting down"
-            if window_closes_at is not None and self._now() >= window_closes_at:
-                return "the allowed time window closed"
+            if guard is not None:
+                stop = guard()
+                if stop:
+                    return stop
             ks = self._ks_provider()
             if ks is not None and not dry_run:
                 allowed, why = ks.allows_injection()
                 if not allowed:
                     return f"stopped by the kill switch: {why}"
-            if not engine.is_running or time.monotonic() >= deadline:
+            if done():
                 return None
             self._cancel.wait(_POLL_SECONDS)

@@ -163,6 +163,7 @@ class TestListAndShow:
             "duration_seconds": 0.3,
             "dry_run": False,
             "window": None,
+            "target": None,
         }
 
     def test_show_one(self, client, configured):
@@ -482,3 +483,159 @@ class TestTimeWindows:
         response = client.post("/experiments/other/run")
         assert response.status_code == 202
         wait_finished(client, run_id(response))
+
+
+class TestTargetSelectors:
+    SELECTOR = {"match_labels": {"env": "staging"}}
+
+    @pytest.fixture
+    def labelled(self, monkeypatch, configured):
+        """An agent labelled env=staging, and one experiment that selects on it."""
+        from src import targets
+
+        monkeypatch.setenv("CHAOS_TARGET_LABELS", "env=staging,app=checkout")
+        monkeypatch.delenv("CHAOS_TARGET_LABELS_FILE", raising=False)
+        targets.agent_labels.reset()
+        configured.experiments["cpu-spike"]["selector"] = self.SELECTOR
+        yield monkeypatch
+        targets.agent_labels.reset()
+
+    def relabel(self, monkeypatch, value):
+        from src import targets
+
+        monkeypatch.setenv("CHAOS_TARGET_LABELS", value)
+        targets.agent_labels.reset()
+
+    def test_target_shows_the_agents_labels(self, client, labelled):
+        assert client.get("/target").json() == {
+            "labels": {"env": "staging", "app": "checkout"},
+            "labels_error": None,
+        }
+
+    def test_target_without_labels(self, client, configured, monkeypatch):
+        from src import targets
+
+        monkeypatch.delenv("CHAOS_TARGET_LABELS", raising=False)
+        monkeypatch.delenv("CHAOS_TARGET_LABELS_FILE", raising=False)
+        targets.agent_labels.reset()
+        assert client.get("/target").json() == {"labels": {}, "labels_error": None}
+
+    def test_target_explains_an_unreadable_labels_file(
+        self, client, configured, monkeypatch, tmp_path
+    ):
+        from src import targets
+
+        monkeypatch.setenv("CHAOS_TARGET_LABELS_FILE", str(tmp_path / "missing"))
+        targets.agent_labels.reset()
+        try:
+            body = client.get("/target").json()
+            assert body["labels"] == {}
+            assert "cannot read" in body["labels_error"]
+            assert str(tmp_path) not in body["labels_error"]
+        finally:
+            monkeypatch.delenv("CHAOS_TARGET_LABELS_FILE")
+            targets.agent_labels.reset()
+
+    def test_the_list_says_whether_this_agent_is_a_target(self, client, labelled):
+        by_name = {
+            e["name"]: e for e in client.get("/experiments").json()["experiments"]
+        }
+        assert by_name["cpu-spike"]["target"] == {"matches": True, "problems": []}
+        assert by_name["other"]["target"] is None
+
+    def test_a_mismatch_is_listed_with_the_reason(self, client, labelled):
+        self.relabel(labelled, "env=prod")
+        target = client.get("/experiments").json()["experiments"][0]["target"]
+        assert target == {
+            "matches": False,
+            "problems": ["env must be 'staging' but is 'prod'"],
+        }
+
+    def test_show_includes_the_selector_and_target_status(self, client, labelled):
+        body = client.get("/experiments/cpu-spike").json()
+        assert body["selector"]["match_labels"] == {"env": "staging"}
+        assert body["target_status"]["matches"] is True
+        assert client.get("/experiments/other").json()["target_status"] is None
+
+    def test_a_matching_agent_runs_it(self, client, labelled):
+        response = client.post("/experiments/cpu-spike/run")
+        assert response.status_code == 202
+        assert response.json()["run"]["target_labels"] == {
+            "env": "staging",
+            "app": "checkout",
+        }
+        assert wait_finished(client, run_id(response))["status"] == "completed"
+
+    def test_a_different_agent_gets_a_409_that_says_why(self, client, labelled):
+        self.relabel(labelled, "env=prod")
+        runs_before = client.get("/experiment-runs").json()["count"]
+        response = client.post("/experiments/cpu-spike/run")
+        assert response.status_code == 409
+        assert "not a target of the experiment" in response.json()["detail"]
+        assert "env must be 'staging' but is 'prod'" in response.json()["detail"]
+        assert client.get("/experiment-runs").json()["count"] == runs_before
+        assert not agent_state.experiments.is_running
+
+    def test_an_unlabelled_agent_is_refused(self, client, labelled):
+        labelled.delenv("CHAOS_TARGET_LABELS")
+        from src import targets
+
+        targets.agent_labels.reset()
+        assert client.post("/experiments/cpu-spike/run").status_code == 409
+
+    def test_a_dry_run_ignores_the_selector(self, client, labelled):
+        self.relabel(labelled, "env=prod")
+        response = client.post("/experiments/cpu-spike/run", json={"dry_run": True})
+        assert response.status_code == 202
+        wait_finished(client, run_id(response))
+
+    def test_experiments_without_a_selector_are_not_gated(self, client, labelled):
+        self.relabel(labelled, "env=prod")
+        response = client.post("/experiments/other/run")
+        assert response.status_code == 202
+        wait_finished(client, run_id(response))
+
+    def test_removing_the_label_stops_a_running_experiment(
+        self, client, labelled, injector
+    ):
+        rid = hold_experiment(client, injector)
+        self.relabel(labelled, "app=checkout")  # env is gone
+        result = wait_finished(client, rid, timeout=10)
+        assert result["status"] == "aborted"
+        assert "no longer match the selector" in result["reason"]
+        assert wait_for(lambda: lifecycle.active_types() == [])
+
+
+class TestStartupRefusesBadLabels:
+    def run_server(self, env_extra):
+        import os
+        import subprocess
+        import sys
+
+        env = {**os.environ, "CHAOS_API_TOKEN": "s" * 40, **env_extra}
+        return subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "src.api_server",
+                "--port",
+                "0",
+                "--metrics-port",
+                "0",
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+
+    def test_invalid_labels(self):
+        result = self.run_server({"CHAOS_TARGET_LABELS": "bad key=x"})
+        assert result.returncode != 0
+        assert "Refusing to start" in result.stdout + result.stderr
+
+    def test_an_unreadable_labels_file(self, tmp_path):
+        result = self.run_server({"CHAOS_TARGET_LABELS_FILE": str(tmp_path / "nope")})
+        assert result.returncode != 0
+        output = result.stdout + result.stderr
+        assert "Refusing to start" in output and "cannot read" in output

@@ -387,6 +387,34 @@ class TestGracefulStop:
         assert aborted == ["cpu"]
 
 
+class TestHalt:
+    def test_halt_stops_rolling_but_leaves_injections_running(self, engines):
+        released = threading.Event()
+        finished = []
+
+        def injector(name, cfg, dry_run):
+            with lifecycle.injection(name) as ticket:
+                if ticket is None:
+                    return
+                cut = ticket.sleep(10)
+                finished.append("cut short" if cut else "ran to the end")
+                released.set()
+
+        e = engines(lambda: settings(interval=0.02, cpu=True), injector=injector)
+        e.start()
+        assert wait_for(lambda: lifecycle.is_active("cpu"))
+        e.halt()
+        assert wait_for(lambda: not e.is_running), "the loop kept rolling"
+        assert e.in_flight() == 1 and lifecycle.is_active("cpu")
+        assert finished == []
+        e.stop(timeout=5)  # now abort it so the test can finish
+        assert released.wait(5)
+        assert finished == ["cut short"]
+
+    def test_halt_when_not_running_is_harmless(self, engines):
+        engines(lambda: None).halt()
+
+
 class TestAuditContext:
     def test_context_overrides_the_scheduler_identity(self, engines):
         from src.audit import audit

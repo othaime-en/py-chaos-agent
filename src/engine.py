@@ -233,6 +233,14 @@ class ChaosEngine:
             self._thread = thread
         thread.start()
 
+    def halt(self) -> None:
+        """
+        Stop rolling new injections and return at once. Injections already running
+        carry on to the end of their own duration; use :meth:`in_flight` to see
+        when they are done, or :meth:`stop` to abort them.
+        """
+        self._stop.set()
+
     def stop(
         self,
         timeout: float = 5.0,

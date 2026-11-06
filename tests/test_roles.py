@@ -63,6 +63,7 @@ READ = [
     ("get", "/config", None),
     ("get", "/config/failures/cpu", None),
     ("get", "/metrics/summary", None),
+    ("get", "/target", None),
     ("get", "/experiments", None),
     ("get", "/experiments/cpu-spike", None),
     ("get", "/experiment-runs", None),

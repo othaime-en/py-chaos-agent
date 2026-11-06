@@ -106,7 +106,7 @@ Each role includes the ones before it.
 
 | Role | Can |
 | --- | --- |
-| `viewer` | `GET /status`, `/config`, `/config/failures/{type}`, `/limits`, `/kill-switch/status`, `/metrics/summary`, `/experiments`, `/experiment-runs` |
+| `viewer` | `GET /status`, `/config`, `/config/failures/{type}`, `/limits`, `/kill-switch/status`, `/metrics/summary`, `/experiments`, `/experiment-runs`, `/target` |
 | `operator` | Also `POST /agent/start`, `/agent/stop`, `/agent/restart`, `/inject/manual`, `/inject/abort`, `/experiments/{name}/run`, `/experiment-runs/abort` |
 | `admin` | Also `PATCH /config`, `PATCH /config/failures/{type}`, `POST /config/reload`, `POST /kill-switch/reset`, `POST /metrics/reset`, `GET /audit` |
 

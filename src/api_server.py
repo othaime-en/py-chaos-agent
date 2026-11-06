@@ -18,7 +18,7 @@ import uvicorn
 import argparse
 import os
 import signal
-from . import auth, tls
+from . import auth, targets, tls
 from .audit import AuditError, audit
 from .lifecycle import lifecycle
 from .logging_config import setup_logging, get_logger
@@ -146,6 +146,13 @@ def main():
     except AuditError as e:
         raise SystemExit(f"Refusing to start: {e}")
 
+    # Labels that are set but invalid would make every selector fail closed
+    # without saying why: stop here and say it instead.
+    try:
+        labels = targets.agent_labels.validate_startup()
+    except targets.TargetLabelsError as e:
+        raise SystemExit(f"Refusing to start: {e}")
+
     logger.info(
         "Starting Py-Chaos-Agent API Server",
         extra={
@@ -153,6 +160,7 @@ def main():
             "api_port": args.port,
             "tls": tls_settings is not None,
             "metrics_port": args.metrics_port,  # None: from CHAOS_METRICS_PORT or 8000
+            "target_labels": labels,
         },
     )
 
