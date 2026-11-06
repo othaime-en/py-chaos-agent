@@ -1,8 +1,9 @@
+import ipaddress
 import subprocess
 import threading
 import time
 import uuid
-from typing import Dict, Iterable, List, Set, Tuple, Optional
+from typing import Any, Dict, Iterable, List, Mapping, Set, Tuple, Optional
 import re
 from ..lifecycle import lifecycle
 from ..limits import MAX_DURATION_SECONDS, within_upper_bound
@@ -322,9 +323,32 @@ def cleanup_all_network_rules() -> None:
                 )
 
 
-def _root_qdisc_is_netem(interface: str) -> bool:
-    result = _run_cmd(["tc", "qdisc", "show", "dev", interface, "root"])
-    return result.returncode == 0 and "netem" in result.stdout.lower()
+# The layout used when only some destinations are delayed. handle 1: is the root
+# prio qdisc, band 3 (class 1:3) holds netem as handle 30:.
+_PRIO_HANDLE = "1:"
+_NETEM_HANDLE = "30:"
+_DELAYED_CLASS = "1:3"
+
+
+def _root_qdisc_is_ours(interface: str) -> bool:
+    """
+    True if the interface carries a rule this agent would have applied: a root
+    netem qdisc (whole interface), or our prio + netem layout (some destinations).
+    Anything else, including someone else's prio qdisc, is not ours.
+    """
+    result = _run_cmd(["tc", "qdisc", "show", "dev", interface])
+    if result.returncode != 0:
+        return False
+    lines = [line.strip().lower() for line in result.stdout.splitlines()]
+    if any(ln.startswith("qdisc netem") and " root" in ln for ln in lines):
+        return True
+    has_prio = any(ln.startswith(f"qdisc prio {_PRIO_HANDLE} root") for ln in lines)
+    has_netem = any(
+        ln.startswith(f"qdisc netem {_NETEM_HANDLE}")
+        and f"parent {_DELAYED_CLASS}" in ln
+        for ln in lines
+    )
+    return has_prio and has_netem
 
 
 def reconcile_stale_rules(interfaces: Iterable[str]) -> List[str]:
@@ -332,8 +356,9 @@ def reconcile_stale_rules(interfaces: Iterable[str]) -> List[str]:
     Remove netem rules left behind by a previous run that could not clean up
     (SIGKILL, an OOM kill, a crash). Call at startup.
 
-    The agent treats a netem root qdisc on an interface it is configured to
-    manage as its own. Other kinds of root qdisc are never touched. Interfaces
+    The agent treats a netem root qdisc, or its own prio + netem layout, on an
+    interface it is configured to manage as its own. Other kinds of root qdisc
+    (including a prio qdisc of someone else's) are never touched. Interfaces
     this process is currently injecting on are skipped.
 
     Returns the interfaces that were repaired.
@@ -351,7 +376,7 @@ def reconcile_stale_rules(interfaces: Iterable[str]) -> List[str]:
             with _tc_lock:
                 if interface in _applied:
                     continue
-                if not _root_qdisc_is_netem(interface):
+                if not _root_qdisc_is_ours(interface):
                     continue
                 success, error = cleanup_network_rules(interface)
         except Exception as e:  # tc missing, no permission, timeout
@@ -379,17 +404,78 @@ def reconcile_stale_rules(interfaces: Iterable[str]) -> List[str]:
 lifecycle.register_cleanup("network-rules", cleanup_all_network_rules)
 
 
+def build_delay_commands(
+    interface: str,
+    delay_ms: int,
+    destinations: Iterable[Mapping[str, Any]] = (),
+) -> List[List[str]]:
+    """
+    The tc commands that apply the delay, in order. Pure: nothing is run.
+
+    With no destinations the whole interface is delayed: one root netem qdisc.
+
+    With destinations, only that traffic is delayed. A prio qdisc becomes the root
+    with every priority mapped to band 2 (class 1:2), so ordinary traffic passes
+    through untouched. netem sits on band 3 (class 1:3), and one u32 filter per
+    destination sends matching packets there. The agent's own API and the
+    platform's health probes are not matched, so they are not delayed.
+
+    Filters match the destination of egress traffic. Ports are read at the fixed
+    offset of a header without options (IPv4 options and IPv6 extension headers
+    are not handled). Raises ValueError for a destination that is not a valid
+    network.
+    """
+    delay = f"{delay_ms}ms"
+    destinations = list(destinations)
+    if not destinations:
+        return [
+            ["tc", "qdisc", "add", "dev", interface, "root", "netem", "delay", delay]
+        ]
+
+    commands = [
+        [
+            "tc", "qdisc", "add", "dev", interface, "root", "handle", _PRIO_HANDLE,
+            "prio", "bands", "3", "priomap", *(["1"] * 16),
+        ],
+        [
+            "tc", "qdisc", "add", "dev", interface, "parent", _DELAYED_CLASS,
+            "handle", _NETEM_HANDLE, "netem", "delay", delay,
+        ],
+    ]  # fmt: skip
+    for index, destination in enumerate(destinations):
+        network = ipaddress.ip_network(destination["cidr"], strict=True)
+        family = "ip6" if network.version == 6 else "ip"
+        command = [
+            "tc", "filter", "add", "dev", interface,
+            "protocol", "ipv6" if network.version == 6 else "ip",
+            "parent", _PRIO_HANDLE + "0", "prio", str(index + 1),
+            "u32", "match", family, "dst", str(network),
+        ]  # fmt: skip
+        protocol = destination.get("protocol")
+        if protocol:
+            number = {"tcp": "6", "udp": "17"}[protocol]
+            command += ["match", family, "protocol", number, "0xff"]
+        port = destination.get("port")
+        if port:
+            command += ["match", family, "dport", str(int(port)), "0xffff"]
+        command += ["flowid", _DELAYED_CLASS]
+        commands.append(command)
+    return commands
+
+
 def inject_network(config: dict, dry_run: bool = False):
     """
     Inject network latency using Linux traffic control (tc).
 
     Args:
         config: Configuration with 'interface', 'delay_ms', 'duration_seconds'
+            and optionally 'destinations' (only delay traffic to those networks)
         dry_run: If True, validate but don't execute
     """
     interface = config.get("interface", "eth0")
     delay_ms = config.get("delay_ms", 100)
     duration = config["duration_seconds"]
+    destinations = list(config.get("destinations") or [])
 
     # Validation
     is_valid, error = validate_interface_name(interface)
@@ -422,6 +508,16 @@ def inject_network(config: dict, dry_run: bool = False):
         INJECTIONS_TOTAL.labels(failure_type="network", status="failed").inc()
         return
 
+    try:
+        commands = build_delay_commands(interface, delay_ms, destinations)
+    except (ValueError, KeyError, TypeError) as e:
+        logger.error(
+            "Network injection failed - destination validation",
+            extra={"error": f"{type(e).__name__}: {e}", "status": "failed"},
+        )
+        INJECTIONS_TOTAL.labels(failure_type="network", status="failed").inc()
+        return
+
     exists, error = verify_interface_exists(interface)
     if not exists:
         logger.error(
@@ -438,6 +534,7 @@ def inject_network(config: dict, dry_run: bool = False):
                 "interface": interface,
                 "delay_ms": delay_ms,
                 "duration_seconds": duration,
+                "destinations": [_describe(d) for d in destinations] or "all traffic",
                 "dry_run": True,
             },
         )
@@ -449,11 +546,29 @@ def inject_network(config: dict, dry_run: bool = False):
     with lifecycle.injection("network") as ticket:
         if ticket is None:
             return
-        _run_network_injection(interface, delay_ms, duration)
+        _run_network_injection(interface, delay_ms, duration, commands, destinations)
 
 
-def _run_network_injection(interface: str, delay_ms: int, duration: int) -> None:
+def _describe(destination: Mapping[str, Any]) -> str:
+    text = str(destination["cidr"])
+    if destination.get("port"):
+        text += f":{destination['port']}"
+    if destination.get("protocol"):
+        text += f"/{destination['protocol']}"
+    return text
+
+
+def _run_network_injection(
+    interface: str,
+    delay_ms: int,
+    duration: int,
+    commands: Optional[List[List[str]]] = None,
+    destinations: Iterable[Mapping[str, Any]] = (),
+) -> None:
     """Apply the rule, hold it, and always remove it. Caller holds the guard."""
+    if commands is None:
+        commands = build_delay_commands(interface, delay_ms, destinations)
+    scope = [_describe(d) for d in destinations] or "all traffic"
     owner = uuid.uuid4().hex
 
     logger.info(
@@ -462,6 +577,7 @@ def _run_network_injection(interface: str, delay_ms: int, duration: int) -> None
             "interface": interface,
             "delay_ms": delay_ms,
             "duration_seconds": duration,
+            "destinations": scope,
             "operation": "network_latency",
         },
     )
@@ -487,22 +603,12 @@ def _run_network_injection(interface: str, delay_ms: int, duration: int) -> None
                 extra={"interface": interface, "delay_ms": delay_ms},
             )
 
-            result = _run_cmd(
-                [
-                    "tc",
-                    "qdisc",
-                    "add",
-                    "dev",
-                    interface,
-                    "root",
-                    "netem",
-                    "delay",
-                    f"{delay_ms}ms",
-                ]
-            )
-
-            if result.returncode != 0:
-                raise Exception(f"Failed to add delay: {result.stderr}")
+            for command in commands:
+                result = _run_cmd(command)
+                if result.returncode != 0:
+                    # The finally below removes the root qdisc, and with it
+                    # anything already added.
+                    raise Exception(f"Failed to add delay: {result.stderr}")
 
         logger.info(
             "Network delay rule applied successfully",

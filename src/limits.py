@@ -106,3 +106,10 @@ MAX_RECOVERY_TIMEOUT_SECONDS = 3600
 # Time windows
 MAX_TIME_WINDOWS = 20
 MAX_TIMEZONE_LENGTH = 64
+
+# Network destinations (see NetworkDestination in src/schemas.py)
+MAX_NETWORK_DESTINATIONS = 10
+# Shorter prefixes would delay a large part of the network, which is not "one
+# dependency" any more. Use no destinations at all to delay the whole interface.
+MIN_DESTINATION_PREFIX_V4 = 16
+MIN_DESTINATION_PREFIX_V6 = 48

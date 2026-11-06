@@ -23,7 +23,7 @@ contained, and what does not.
 | CPU | The agent container's CPU. The target only feels it through contention for shared node CPU. | Container CPU limit x `cpu_fraction` (at least 1 core), then the hard ceiling of 16 cores |
 | Memory | The agent container's memory. The target only feels it through node-level memory pressure. | Free memory under the container limit x `memory_fraction`, then the hard ceiling of 2048 MB |
 | Process kill | Processes whose name matches `target_name` in the shared PID namespace, so this pod only | Name validation and the critical-process list. Not a resource limit. |
-| Network latency | The pod's network interface, so **every container in the pod**, including the agent's own API and the Kubernetes probes | `delay_ms` up to 10000, `duration_seconds` up to 300, validated interface name |
+| Network latency | By default the pod's network interface, so **every container in the pod**, including the agent's own API and the Kubernetes probes. With `destinations` set, **only traffic to those destinations** (see [Delaying one dependency](../getting-started/configuration.md#destinations)) | `delay_ms` up to 10000, `duration_seconds` up to 300, validated interface name, and for destinations: no loopback, link-local or multicast, nothing wider than /16 (IPv4) or /48 (IPv6) |
 
 ## How the budget is computed
 
