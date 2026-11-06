@@ -165,6 +165,7 @@ experiments:
 | --- | --- |
 | `CHAOS_TARGET_LABELS` | Comma-separated `key=value` pairs, e.g. `env=staging,app=checkout`. |
 | `CHAOS_TARGET_LABELS_FILE` | A file with one `key="value"` per line. This is the exact format Kubernetes writes for the downward API field `metadata.labels`, so a pod's labels can be mounted straight in. |
+| `CHAOS_TARGET_ID` | The agent's stable identity, used to pick which agents run an experiment when `sample_percent` is set. Defaults to the host name (the pod name on Kubernetes). |
 
 If both are set the file wins on a clash. `k8s/chaos-demo.yaml` mounts the pod's
 labels this way. `GET /target` shows the labels the agent currently has.
