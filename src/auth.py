@@ -64,6 +64,7 @@ ROLE_POLICY: Dict[Tuple[str, str], str] = {
     ("GET", "/target"): VIEWER,
     ("GET", "/experiments"): VIEWER,
     ("GET", "/experiments/{name}"): VIEWER,
+    ("GET", "/experiments/{name}/selection"): VIEWER,
     ("GET", "/experiment-runs"): VIEWER,
     ("GET", "/experiment-runs/{run_id}"): VIEWER,
     ("GET", "/docs"): VIEWER,

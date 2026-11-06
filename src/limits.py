@@ -113,3 +113,7 @@ MAX_NETWORK_DESTINATIONS = 10
 # dependency" any more. Use no destinations at all to delay the whole interface.
 MIN_DESTINATION_PREFIX_V4 = 16
 MIN_DESTINATION_PREFIX_V6 = 48
+
+# Concurrency inside an experiment (there are only four failure types)
+MIN_CONCURRENT_INJECTIONS = 1
+MAX_CONCURRENT_INJECTIONS = 4

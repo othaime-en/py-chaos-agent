@@ -66,6 +66,7 @@ READ = [
     ("get", "/target", None),
     ("get", "/experiments", None),
     ("get", "/experiments/cpu-spike", None),
+    ("get", "/experiments/cpu-spike/selection", None),
     ("get", "/experiment-runs", None),
     ("get", "/experiment-runs/abc", None),
 ]

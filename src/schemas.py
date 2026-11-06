@@ -282,6 +282,81 @@ FAILURE_MODELS: Dict[str, Type[_FailureBase]] = {
 # ---------------------------------------------------------------------------
 
 
+class SelectorExpression(_StrictModel):
+    """``In`` and ``NotIn`` need values; ``Exists`` and ``DoesNotExist`` take none."""
+
+    key: str
+    operator: Literal["In", "NotIn", "Exists", "DoesNotExist"]
+    values: List[str] = Field(default_factory=list, max_length=MAX_SELECTOR_VALUES)
+
+    @field_validator("key")
+    @classmethod
+    def _valid_key(cls, value: str) -> str:
+        return validate_label_key(value)
+
+    @field_validator("values")
+    @classmethod
+    def _valid_values(cls, value: List[str]) -> List[str]:
+        for item in value:
+            validate_label_value(item)
+        return value
+
+    @model_validator(mode="after")
+    def _values_fit_the_operator(self) -> "SelectorExpression":
+        if self.operator in ("In", "NotIn") and not self.values:
+            raise ValueError(f"operator {self.operator} needs at least one value")
+        if self.operator in ("Exists", "DoesNotExist") and self.values:
+            raise ValueError(f"operator {self.operator} takes no values")
+        return self
+
+
+class TargetSelector(_StrictModel):
+    """
+    Where an experiment may run, by the labels of the agent's target.
+
+    Every condition must hold. The experiment is refused on an agent whose labels
+    (``CHAOS_TARGET_LABELS`` / ``CHAOS_TARGET_LABELS_FILE``) do not satisfy it. See
+    ``src.targets`` for the rules.
+    """
+
+    match_labels: Dict[str, str] = Field(
+        default_factory=dict, max_length=MAX_SELECTOR_ITEMS
+    )
+    match_expressions: List[SelectorExpression] = Field(
+        default_factory=list, max_length=MAX_SELECTOR_ITEMS
+    )
+    # Of the agents that match, only this share runs the experiment. Each agent
+    # decides for itself from a stable hash of its identity, the experiment name
+    # and the run's sample key, so the same agents are picked every time unless the
+    # key changes. See src.selection.
+    sample_percent: Optional[float] = Field(
+        default=None, gt=0, le=100, allow_inf_nan=False
+    )
+
+    @field_validator("match_labels")
+    @classmethod
+    def _valid_labels(cls, value: Dict[str, str]) -> Dict[str, str]:
+        for key, item in value.items():
+            validate_label_key(key)
+            validate_label_value(item, key)
+        return value
+
+    @model_validator(mode="after")
+    def _not_empty(self) -> "TargetSelector":
+        if not self.match_labels and not self.match_expressions:
+            if self.sample_percent is None:
+                raise ValueError(
+                    "a selector needs match_labels, match_expressions or "
+                    "sample_percent; an empty selector would match every agent"
+                )
+            return self
+        try:
+            validate_selector(self.model_dump())
+        except TargetLabelsError as e:
+            raise ValueError(str(e)) from None
+        return self
+
+
 class AgentSettings(_StrictModel):
     interval_seconds: int = Field(
         default=10,
@@ -292,6 +367,22 @@ class AgentSettings(_StrictModel):
     # API mode only: start injecting as soon as the API starts, instead of
     # waiting for POST /agent/start. The standalone agent always runs.
     auto_start: bool = False
+    # Opt-in gate for everything this agent does (experiments, the loop and manual
+    # injections): chaos only runs while the agent's labels satisfy it. A pod that
+    # forgot the label is safe. Operator-only, like the safety limits; it cannot be
+    # changed through the API.
+    eligibility: Optional[TargetSelector] = None
+
+    @field_validator("eligibility")
+    @classmethod
+    def _eligibility_is_labels_only(
+        cls, value: Optional[TargetSelector]
+    ) -> Optional[TargetSelector]:
+        if value is not None and value.sample_percent is not None:
+            raise ValueError("eligibility cannot use sample_percent")
+        if value is not None and not (value.match_labels or value.match_expressions):
+            raise ValueError("eligibility needs match_labels or match_expressions")
+        return value
 
 
 class FailuresSection(_StrictModel):
@@ -500,6 +591,14 @@ class ExperimentSchedule(_StrictModel):
         ge=limits.MIN_EXPERIMENT_INJECTIONS,
         le=limits.MAX_EXPERIMENT_INJECTIONS,
     )
+    # At most this many injections running at once (they are already limited to
+    # one per type). 1 means a single fault at a time, never cpu and network
+    # together. None: no cap beyond one per type.
+    max_concurrent_injections: Optional[int] = Field(
+        default=None,
+        ge=limits.MIN_CONCURRENT_INJECTIONS,
+        le=limits.MAX_CONCURRENT_INJECTIONS,
+    )
 
 
 # Inside an experiment a listed fault is meant to run, so the defaults differ
@@ -541,67 +640,6 @@ class ExperimentFaults(_StrictModel):
                 "an experiment needs at least one fault that is enabled with a "
                 "probability above 0"
             )
-        return self
-
-
-class SelectorExpression(_StrictModel):
-    """``In`` and ``NotIn`` need values; ``Exists`` and ``DoesNotExist`` take none."""
-
-    key: str
-    operator: Literal["In", "NotIn", "Exists", "DoesNotExist"]
-    values: List[str] = Field(default_factory=list, max_length=MAX_SELECTOR_VALUES)
-
-    @field_validator("key")
-    @classmethod
-    def _valid_key(cls, value: str) -> str:
-        return validate_label_key(value)
-
-    @field_validator("values")
-    @classmethod
-    def _valid_values(cls, value: List[str]) -> List[str]:
-        for item in value:
-            validate_label_value(item)
-        return value
-
-    @model_validator(mode="after")
-    def _values_fit_the_operator(self) -> "SelectorExpression":
-        if self.operator in ("In", "NotIn") and not self.values:
-            raise ValueError(f"operator {self.operator} needs at least one value")
-        if self.operator in ("Exists", "DoesNotExist") and self.values:
-            raise ValueError(f"operator {self.operator} takes no values")
-        return self
-
-
-class TargetSelector(_StrictModel):
-    """
-    Where an experiment may run, by the labels of the agent's target.
-
-    Every condition must hold. The experiment is refused on an agent whose labels
-    (``CHAOS_TARGET_LABELS`` / ``CHAOS_TARGET_LABELS_FILE``) do not satisfy it. See
-    ``src.targets`` for the rules.
-    """
-
-    match_labels: Dict[str, str] = Field(
-        default_factory=dict, max_length=MAX_SELECTOR_ITEMS
-    )
-    match_expressions: List[SelectorExpression] = Field(
-        default_factory=list, max_length=MAX_SELECTOR_ITEMS
-    )
-
-    @field_validator("match_labels")
-    @classmethod
-    def _valid_labels(cls, value: Dict[str, str]) -> Dict[str, str]:
-        for key, item in value.items():
-            validate_label_key(key)
-            validate_label_value(item, key)
-        return value
-
-    @model_validator(mode="after")
-    def _not_empty(self) -> "TargetSelector":
-        try:
-            validate_selector(self.model_dump())
-        except TargetLabelsError as e:
-            raise ValueError(str(e)) from None
         return self
 
 

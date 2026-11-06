@@ -19,6 +19,7 @@ from .auth import auth_disabled, get_expected_token, require_auth
 from . import limits
 from .config import Config, load_config, validate_config
 from .engine import ChaosEngine, Settings, run_injection, snapshot_settings
+from . import selection as selecting
 from . import targets
 from . import windows as time_windows
 from .experiments import (
@@ -126,6 +127,20 @@ def _active_kill_switch() -> Optional[KillSwitch]:
     return ks if ks is not None and ks.config.enabled else None
 
 
+def _eligibility_rule() -> Optional[Dict[str, Any]]:
+    """The agent-wide opt-in rule from the config (``agent.eligibility``), or None."""
+    config = agent_state.config
+    return config.agent.eligibility if config is not None else None
+
+
+def _eligibility_reason() -> Optional[str]:
+    """Why this agent may not run chaos right now, or None if it may."""
+    rule = _eligibility_rule()
+    if not rule:
+        return None
+    return selecting.eligibility_problem(rule, targets.agent_labels.get())
+
+
 def _settings_snapshot() -> Optional[Settings]:
     """A private copy of the loop settings, taken under the config lock."""
     with agent_state.config_lock:
@@ -140,6 +155,7 @@ def _on_engine_exit() -> None:
 agent_state.engine = ChaosEngine(
     settings_provider=_settings_snapshot,
     kill_switch_provider=_active_kill_switch,
+    eligibility_provider=_eligibility_reason,
     on_exit=_on_engine_exit,
     name="chaos-api",
 )
@@ -147,7 +163,10 @@ agent_state.engine = ChaosEngine(
 
 # Experiments are gated by the same kill switch as everything else. It is looked
 # up on every use, so a kill switch created or swapped later is honored.
-agent_state.experiments = ExperimentRunner(kill_switch_provider=_active_kill_switch)
+agent_state.experiments = ExperimentRunner(
+    kill_switch_provider=_active_kill_switch,
+    eligibility_provider=_eligibility_rule,
+)
 
 
 def _begin_agent_loop() -> None:
@@ -268,14 +287,22 @@ class AgentStatus(BaseModel):
     active_injections: List[str] = []
     paused_by_kill_switch: bool = False
     active_experiment: Optional[str] = None
+    # False while the agent-wide opt-in rule (agent.eligibility) is not met.
+    eligible: bool = True
+    eligibility_reason: Optional[str] = None
 
 
 class ExperimentRunRequest(BaseModel):
-    """``dry_run`` overrides the experiment's own setting when given."""
+    """
+    ``dry_run`` overrides the experiment's own setting when given.
+    ``sample_key`` picks which agents fall in a ``sample_percent`` sample: the same
+    key picks the same agents, a new key (a date, say) draws a new sample.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     dry_run: Optional[bool] = Field(None, strict=True)
+    sample_key: str = Field("", pattern=r"^[A-Za-z0-9._:-]{0,64}$", strict=True)
 
 
 class ManualInjectionRequest(BaseModel):
@@ -359,6 +386,7 @@ async def get_status():
     enabled_failures = [name for name, cfg in config.failures.items() if cfg["enabled"]]
     ks = _active_kill_switch()
     current = agent_state.experiments.current()
+    eligibility_reason = _eligibility_reason()
 
     return AgentStatus(
         enabled=agent_state.enabled,
@@ -370,6 +398,8 @@ async def get_status():
         active_injections=lifecycle.active_types(),
         paused_by_kill_switch=bool(ks and ks.paused),
         active_experiment=(current or {}).get("experiment"),
+        eligible=eligibility_reason is None,
+        eligibility_reason=eligibility_reason,
     )
 
 
@@ -569,6 +599,14 @@ async def manual_injection(
         if not allowed:
             raise HTTPException(status_code=409, detail=f"Chaos paused: {reason}")
 
+    if not request.dry_run:
+        ineligible = _eligibility_reason()
+        if ineligible:
+            raise HTTPException(
+                status_code=409,
+                detail=f"This agent is not eligible for chaos: {ineligible}",
+            )
+
     if not request.dry_run and agent_state.experiments.is_running:
         raise HTTPException(
             status_code=409,
@@ -716,6 +754,7 @@ async def get_target():
     do not match.
     """
     return {
+        "agent_id": agent_state.experiments.agent_id(),
         "labels": agent_state.experiments.target_labels(),
         "labels_error": targets.agent_labels.error,
     }
@@ -745,6 +784,53 @@ async def get_experiment(name: str):
     }
 
 
+def _busy_reason() -> Optional[str]:
+    if agent_state.enabled:
+        return "the agent loop is running"
+    current = agent_state.experiments.current()
+    if current:
+        return f"experiment '{current['experiment']}' is running"
+    active = lifecycle.active_types()
+    if active:
+        return "an injection is running (" + ", ".join(active) + ")"
+    return None
+
+
+@app.get("/experiments/{name}/selection", tags=["Experiments"])
+async def preview_selection(
+    name: str,
+    sample_key: str = Query("", pattern=r"^[A-Za-z0-9._:-]{0,64}$"),
+):
+    """
+    Would this agent run the experiment right now, and if not, why not?
+
+    Checks every gate in order (eligibility, selector, window, sample, kill switch,
+    anything already running), reports each with its reason, and changes nothing.
+    ``would_run`` is true only if all pass. The resource budget is checked when you
+    actually start a run, not here.
+    """
+    exp = _find_experiment(name)
+    ks = _active_kill_switch()
+    ks_reason = None
+    if ks is not None:
+        allowed, why = ks.allows_injection()
+        ks_reason = None if allowed else why
+    result = agent_state.experiments.select(
+        exp,
+        sample_key,
+        kill_switch_reason=ks_reason,
+        busy_reason=_busy_reason(),
+        report_state=True,
+    )
+    return {
+        "experiment": name,
+        "agent_id": agent_state.experiments.agent_id(),
+        "sample_key": sample_key,
+        "would_run": result.eligible,
+        **result.to_dict(),
+    }
+
+
 @app.post("/experiments/{name}/run", status_code=202, tags=["Experiments"])
 async def run_experiment(
     name: str,
@@ -765,6 +851,7 @@ async def run_experiment(
     """
     exp = _find_experiment(name)
     dry_run = request.dry_run if request else None
+    sample_key = request.sample_key if request else ""
     effective_dry_run = exp["dry_run"] if dry_run is None else dry_run
     annotate(http_request, experiment=name, dry_run=effective_dry_run)
 
@@ -824,6 +911,7 @@ async def run_experiment(
             principal=who.name if who else "unknown",
             role=who.role if who else None,
             dry_run=dry_run,
+            sample_key=sample_key,
         )
     except (ExperimentBusy, OutsideWindow, TargetMismatch) as e:
         raise HTTPException(status_code=409, detail=str(e))

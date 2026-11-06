@@ -273,6 +273,7 @@ def test_defaults_are_filled_in():
         "interval_seconds": 10,
         "dry_run": False,
         "auto_start": False,
+        "eligibility": None,
     }
     assert out["failures"]["cpu"] == {
         "enabled": False,

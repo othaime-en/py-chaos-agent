@@ -115,6 +115,7 @@ class TickResult:
     started: int = 0
     busy: int = 0
     paused: bool = False
+    ineligible: bool = False
 
 
 class ChaosEngine:
@@ -139,6 +140,14 @@ class ChaosEngine:
             started (dry runs count). ``None`` means no cap. Once the cap is
             reached the loop ends by itself and :attr:`exhausted` is True;
             injections already running are left to finish.
+        max_concurrent: At most this many injections of this engine running at
+            once (on top of the one-per-type rule). ``None`` means no cap. A type
+            that would exceed it is left for the next tick, like a busy one.
+        eligibility_provider: Returns why this agent may not run chaos right now,
+            or ``None`` if it may. While it returns a reason (and the tick is not
+            a dry run) the tick is skipped, and running injections are aborted
+            the moment the agent becomes ineligible, so removing the opt-in label
+            stops everything.
         audit_context: Extra fields for the audit events of every injection
             this engine starts. They override the defaults, so an experiment
             can record who started it and under which run instead of
@@ -155,6 +164,8 @@ class ChaosEngine:
         name: str = "chaos-engine",
         max_injections: Optional[int] = None,
         audit_context: Optional[Mapping[str, Any]] = None,
+        max_concurrent: Optional[int] = None,
+        eligibility_provider: Optional[Callable[[], Optional[str]]] = None,
     ) -> None:
         self._settings_provider = settings_provider
         self._kill_switch_provider = kill_switch_provider or (lambda: None)
@@ -163,6 +174,10 @@ class ChaosEngine:
         self._error_backoff = error_backoff_seconds
         self._name = name
         self._max_injections = max_injections
+        self._max_concurrent = max_concurrent
+        self._eligibility_provider = eligibility_provider
+        self._was_eligible = True
+        self._last_dry_run = False
         self._audit_context: Dict[str, Any] = dict(audit_context or {})
 
         self._lock = threading.Lock()
@@ -229,6 +244,7 @@ class ChaosEngine:
             self._paused = False
             self._injections_started = 0
             self._exhausted = False
+            self._was_eligible = True
             thread = threading.Thread(target=self._run, daemon=True, name=self._name)
             self._thread = thread
         thread.start()
@@ -298,6 +314,29 @@ class ChaosEngine:
             if remaining <= 0:
                 return
             self._stop.wait(min(remaining, _WAIT_SLICE_SECONDS))
+            self._abort_if_no_longer_eligible()
+
+    def _abort_if_no_longer_eligible(self) -> None:
+        """
+        Between ticks: stop running injections the moment the agent stops being
+        eligible, instead of letting them outlive the label until the next tick
+        (which can be a long time away).
+        """
+        if (
+            self._eligibility_provider is None
+            or self._last_dry_run
+            or not self._was_eligible
+            or not lifecycle.active_types()
+        ):
+            return
+        reason = self._eligibility_provider()
+        if reason:
+            logger.warning(
+                "Agent is no longer eligible for chaos, aborting running injections",
+                extra={"reason": reason},
+            )
+            self._was_eligible = False
+            lifecycle.abort_active("agent no longer eligible for chaos")
 
     def _run(self) -> None:
         logger.info("Chaos engine started")
@@ -348,6 +387,26 @@ class ChaosEngine:
         result = TickResult(iteration=iteration)
         self._resume_if_recovered()
 
+        self._last_dry_run = settings.dry_run
+
+        # The opt-in gate. Dry runs change nothing, so they are never gated.
+        if self._eligibility_provider is not None and not settings.dry_run:
+            reason = self._eligibility_provider()
+            if reason:
+                if self._was_eligible:
+                    logger.warning(
+                        "Agent is not eligible for chaos, skipping ticks and "
+                        "aborting running injections",
+                        extra={"reason": reason},
+                    )
+                    lifecycle.abort_active("agent no longer eligible for chaos")
+                self._was_eligible = False
+                result.ineligible = True
+                return result
+            if not self._was_eligible:
+                logger.info("Agent is eligible for chaos again")
+            self._was_eligible = True
+
         for name, cfg in settings.failures.items():
             if self._should_exit():
                 break
@@ -383,6 +442,21 @@ class ChaosEngine:
                 logger.debug(
                     "Injection still running, not starting another",
                     extra={"failure_type": name},
+                )
+                result.busy += 1
+                continue
+
+            if (
+                self._max_concurrent is not None
+                and not settings.dry_run
+                and self.in_flight() >= self._max_concurrent
+            ):
+                logger.debug(
+                    "Concurrency cap reached, not starting another",
+                    extra={
+                        "failure_type": name,
+                        "max_concurrent": self._max_concurrent,
+                    },
                 )
                 result.busy += 1
                 continue

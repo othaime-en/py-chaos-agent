@@ -507,10 +507,10 @@ class TestTargetSelectors:
         targets.agent_labels.reset()
 
     def test_target_shows_the_agents_labels(self, client, labelled):
-        assert client.get("/target").json() == {
-            "labels": {"env": "staging", "app": "checkout"},
-            "labels_error": None,
-        }
+        body = client.get("/target").json()
+        assert body["labels"] == {"env": "staging", "app": "checkout"}
+        assert body["labels_error"] is None
+        assert body["agent_id"]
 
     def test_target_without_labels(self, client, configured, monkeypatch):
         from src import targets
@@ -518,7 +518,8 @@ class TestTargetSelectors:
         monkeypatch.delenv("CHAOS_TARGET_LABELS", raising=False)
         monkeypatch.delenv("CHAOS_TARGET_LABELS_FILE", raising=False)
         targets.agent_labels.reset()
-        assert client.get("/target").json() == {"labels": {}, "labels_error": None}
+        body = client.get("/target").json()
+        assert body["labels"] == {} and body["labels_error"] is None
 
     def test_target_explains_an_unreadable_labels_file(
         self, client, configured, monkeypatch, tmp_path
@@ -639,3 +640,250 @@ class TestStartupRefusesBadLabels:
         assert result.returncode != 0
         output = result.stdout + result.stderr
         assert "Refusing to start" in output and "cannot read" in output
+
+
+class TestSelectionPreview:
+    @pytest.fixture
+    def labelled(self, monkeypatch, configured):
+        from src import targets
+
+        monkeypatch.setenv("CHAOS_TARGET_LABELS", "env=staging,chaos-enabled=true")
+        monkeypatch.delenv("CHAOS_TARGET_LABELS_FILE", raising=False)
+        monkeypatch.setenv("CHAOS_TARGET_ID", "pod-under-test")
+        targets.agent_labels.reset()
+        configured.experiments["cpu-spike"]["selector"] = {
+            "match_labels": {"env": "staging"}
+        }
+        yield configured
+        targets.agent_labels.reset()
+
+    def relabel(self, monkeypatch, value):
+        from src import targets
+
+        monkeypatch.setenv("CHAOS_TARGET_LABELS", value)
+        targets.agent_labels.reset()
+
+    def test_everything_passes(self, client, labelled):
+        body = client.get("/experiments/cpu-spike/selection").json()
+        assert body["would_run"] is True
+        assert body["agent_id"] == "pod-under-test"
+        gates = {g["gate"]: g for g in body["gates"]}
+        assert list(gates) == ["selector", "kill_switch", "idle"]
+        assert all(g["ok"] for g in gates.values())
+
+    def test_it_says_why_not(self, client, labelled, monkeypatch):
+        self.relabel(monkeypatch, "env=prod")
+        body = client.get("/experiments/cpu-spike/selection").json()
+        assert body["would_run"] is False
+        selector = next(g for g in body["gates"] if g["gate"] == "selector")
+        assert selector == {
+            "gate": "selector",
+            "ok": False,
+            "detail": "env must be 'staging' but is 'prod'",
+        }
+
+    def test_an_unrestricted_experiment_has_only_the_state_gates(
+        self, client, labelled
+    ):
+        body = client.get("/experiments/other/selection").json()
+        assert [g["gate"] for g in body["gates"]] == ["kill_switch", "idle"]
+        assert body["would_run"] is True
+
+    def test_it_reports_what_is_already_running(self, client, labelled, injector):
+        hold_experiment(client, injector, name="other")
+        body = client.get("/experiments/cpu-spike/selection").json()
+        idle = next(g for g in body["gates"] if g["gate"] == "idle")
+        assert not idle["ok"] and "experiment 'other' is running" in idle["detail"]
+        assert body["would_run"] is False
+
+    def test_it_reports_the_agent_loop(self, client, labelled):
+        assert client.post("/agent/start").status_code == 200
+        idle = next(
+            g
+            for g in client.get("/experiments/cpu-spike/selection").json()["gates"]
+            if g["gate"] == "idle"
+        )
+        assert "the agent loop is running" in idle["detail"]
+
+    def test_it_reports_an_open_kill_switch(self, client, labelled):
+        agent_state.kill_switch = TestSafetyGates().make_ks()
+        gate = next(
+            g
+            for g in client.get("/experiments/cpu-spike/selection").json()["gates"]
+            if g["gate"] == "kill_switch"
+        )
+        assert not gate["ok"] and gate["detail"].startswith("Chaos paused:")
+
+    def test_it_changes_nothing(self, client, labelled, injector):
+        runs = client.get("/experiment-runs").json()["count"]
+        client.get("/experiments/cpu-spike/selection")
+        assert client.get("/experiment-runs").json()["count"] == runs
+        assert injector.calls == []
+        assert not agent_state.experiments.is_running
+
+    def test_the_sample_key_changes_the_answer(self, client, labelled):
+        labelled.experiments["cpu-spike"]["selector"] = {"sample_percent": 50}
+        answers = {
+            client.get(f"/experiments/cpu-spike/selection?sample_key=k{i}").json()[
+                "would_run"
+            ]
+            for i in range(30)
+        }
+        assert answers == {True, False}
+
+    def test_the_same_key_always_gives_the_same_answer(self, client, labelled):
+        labelled.experiments["cpu-spike"]["selector"] = {"sample_percent": 50}
+        answers = {
+            client.get("/experiments/cpu-spike/selection?sample_key=day-1").json()[
+                "would_run"
+            ]
+            for _ in range(5)
+        }
+        assert len(answers) == 1
+
+    @pytest.mark.parametrize("key", ["has space", "x" * 65, "a/b", "semi;colon"])
+    def test_bad_sample_keys(self, client, labelled, key):
+        assert (
+            client.get(
+                "/experiments/cpu-spike/selection", params={"sample_key": key}
+            ).status_code
+            == 422
+        )
+
+    def test_unknown_experiment(self, client, labelled):
+        assert client.get("/experiments/nope/selection").status_code == 404
+
+
+class TestOptInEligibility:
+    RULE = {"match_labels": {"chaos-enabled": "true"}, "match_expressions": []}
+
+    @pytest.fixture
+    def opted_in(self, monkeypatch, configured):
+        from src import targets
+
+        monkeypatch.delenv("CHAOS_TARGET_LABELS_FILE", raising=False)
+        monkeypatch.setenv("CHAOS_TARGET_LABELS", "chaos-enabled=true")
+        targets.agent_labels.reset()
+        configured.agent.eligibility = self.RULE
+        yield monkeypatch
+        targets.agent_labels.reset()
+
+    def remove_label(self, monkeypatch):
+        from src import targets
+
+        monkeypatch.setenv("CHAOS_TARGET_LABELS", "app=checkout")
+        targets.agent_labels.reset()
+
+    def test_a_labelled_pod_is_eligible(self, client, opted_in):
+        body = client.get("/status").json()
+        assert body["eligible"] is True and body["eligibility_reason"] is None
+
+    def test_an_unlabelled_pod_is_not(self, client, opted_in):
+        self.remove_label(opted_in)
+        body = client.get("/status").json()
+        assert body["eligible"] is False
+        assert (
+            "chaos-enabled must be 'true' but is not set" in body["eligibility_reason"]
+        )
+
+    def test_no_rule_means_always_eligible(self, client, configured):
+        assert client.get("/status").json()["eligible"] is True
+
+    def test_an_unlabelled_pod_cannot_start_an_experiment(self, client, opted_in):
+        self.remove_label(opted_in)
+        response = client.post("/experiments/cpu-spike/run")
+        assert response.status_code == 409
+        assert "not eligible for chaos" in response.json()["detail"]
+
+    def test_nor_run_a_manual_injection(self, client, opted_in):
+        self.remove_label(opted_in)
+        response = client.post("/inject/manual", json={"failure_type": "cpu"})
+        assert response.status_code == 409
+        assert "not eligible for chaos" in response.json()["detail"]
+
+    def test_manual_dry_runs_are_still_fine(self, client, opted_in):
+        self.remove_label(opted_in)
+        response = client.post(
+            "/inject/manual", json={"failure_type": "cpu", "dry_run": True}
+        )
+        assert response.status_code == 200
+
+    def test_a_labelled_pod_can_do_both(self, client, opted_in):
+        assert (
+            client.post(
+                "/inject/manual", json={"failure_type": "cpu", "dry_run": True}
+            ).status_code
+            == 200
+        )
+        response = client.post("/experiments/cpu-spike/run")
+        assert response.status_code == 202
+        wait_finished(client, run_id(response))
+
+    def test_the_preview_shows_the_gate(self, client, opted_in):
+        self.remove_label(opted_in)
+        body = client.get("/experiments/cpu-spike/selection").json()
+        assert body["would_run"] is False
+        assert body["gates"][0]["gate"] == "eligibility" and not body["gates"][0]["ok"]
+
+    def test_a_dry_run_experiment_is_allowed_and_reports_why(self, client, opted_in):
+        self.remove_label(opted_in)
+        response = client.post("/experiments/cpu-spike/run", json={"dry_run": True})
+        assert response.status_code == 202
+        result = wait_finished(client, run_id(response))
+        assert result["status"] == "completed"
+        assert result["selection"]["eligible"] is False
+        assert result["selection"]["gates"][0]["gate"] == "eligibility"
+
+    def test_removing_the_label_stops_a_running_experiment(
+        self, client, opted_in, injector
+    ):
+        rid = hold_experiment(client, injector)
+        self.remove_label(opted_in)
+        result = wait_finished(client, rid, timeout=10)
+        assert result["status"] == "aborted"
+        assert "no longer eligible for chaos" in result["reason"]
+        assert wait_for(lambda: lifecycle.active_types() == [])
+
+    def test_the_rule_cannot_be_changed_through_the_api(self, client, opted_in):
+        response = client.patch("/config/agent", json={"eligibility": None})
+        assert response.status_code in (404, 405, 422)
+        assert agent_state.config.agent.eligibility == self.RULE
+
+
+class TestSampleKeyOnRun:
+    def test_the_key_is_accepted_and_recorded_in_the_selection(
+        self, client, configured, monkeypatch
+    ):
+        monkeypatch.setenv("CHAOS_TARGET_ID", "pod-1")
+        configured.experiments["cpu-spike"]["selector"] = {"sample_percent": 100}
+        response = client.post(
+            "/experiments/cpu-spike/run", json={"sample_key": "2026-11-05"}
+        )
+        assert response.status_code == 202
+        result = wait_finished(client, run_id(response))
+        assert result["selection"]["eligible"] is True
+
+    @pytest.mark.parametrize("key", ["has space", "x" * 65, 5, None])
+    def test_bad_keys(self, client, configured, key):
+        assert (
+            client.post(
+                "/experiments/cpu-spike/run", json={"sample_key": key}
+            ).status_code
+            == 422
+        )
+
+    def test_an_agent_outside_the_sample_gets_a_409(
+        self, client, configured, monkeypatch
+    ):
+        from src.selection import sample_bucket
+
+        agent = next(
+            f"pod-{i}"
+            for i in range(1000)
+            if sample_bucket(f"pod-{i}", "cpu-spike", "") >= 10
+        )
+        monkeypatch.setenv("CHAOS_TARGET_ID", agent)
+        configured.experiments["cpu-spike"]["selector"] = {"sample_percent": 10}
+        response = client.post("/experiments/cpu-spike/run")
+        assert response.status_code == 409
+        assert "not in the experiment's sample" in response.json()["detail"]
