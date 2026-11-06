@@ -71,6 +71,13 @@ EXPERIMENTS_TOTAL = Counter(
     ["status", "verdict"],
 )
 
+SLO_ABORTS_TOTAL = Counter(
+    "chaos_slo_aborts_total",
+    "Experiments stopped because their SLO checks failed",
+    # kind: breach (a limit was violated) or unavailable (it could not be checked).
+    ["kind"],
+)
+
 EXPERIMENT_ACTIVE = Gauge(
     "chaos_experiment_active", "1 while an experiment is running, otherwise 0"
 )
@@ -157,5 +164,6 @@ def reset_metrics() -> None:
         INJECTIONS_CLAMPED,
         INJECTION_ACTIVE,
         EXPERIMENTS_TOTAL,
+        SLO_ABORTS_TOTAL,
     ):
         collector.clear()

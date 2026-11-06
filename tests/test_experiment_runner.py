@@ -1314,3 +1314,237 @@ class TestBlackouts:
         )  # Monday
         with pytest.raises(OutsideWindow, match="blackout period \\(freeze\\)"):
             runner.start(make_experiment(target, windows=windows))
+
+
+# ---------------------------------------------------------------------------
+# SLO abort
+# ---------------------------------------------------------------------------
+
+from src.metrics import SLO_ABORTS_TOTAL  # noqa: E402
+from tests.fake_prometheus import FakePrometheus, vector  # noqa: E402
+
+
+@pytest.fixture
+def prom():
+    p = FakePrometheus(vector(0.001))
+    yield p
+    p.close()
+
+
+def prom_check(prom, **overrides):
+    return {
+        "type": "prometheus",
+        "name": "error-rate",
+        "url": prom.url,
+        "query": "sum(rate(errors_total[1m])) / sum(rate(requests_total[1m]))",
+        "operator": "<",
+        "threshold": 0.01,
+        "timeout_seconds": 2,
+        "on_no_data": "fail",
+        "bearer_token_env": None,
+        **overrides,
+    }
+
+
+def with_slo(target, checks, **slo):
+    return make_experiment(
+        target,
+        slo={
+            "checks": checks,
+            "check_interval_seconds": 0.05,
+            "breach_after": 2,
+            "grace_seconds": 0,
+            **slo,
+        },
+    )
+
+
+LONG = {"duration_seconds": 60, "interval_seconds": 1}
+
+
+class TestSloAbort:
+    def start_holding(self, runners, target, prom, **kwargs):
+        inj = Injector()
+        inj.hold_seconds = 30
+        runner = runners(injector=inj)
+        exp = with_slo(target, [prom_check(prom)], **kwargs)
+        exp["schedule"].update(LONG)
+        exp["steady_state"].update(
+            recovery_timeout_seconds=3, check_interval_seconds=0.05
+        )
+        run = runner.start(exp)
+        assert wait_for(lambda: lifecycle.is_active("cpu"))
+        return runner, inj, run
+
+    def test_a_healthy_slo_does_not_interfere(self, runners, target, prom):
+        runner = runners(injector=Injector())
+        result = run_to_end(runner, with_slo(target, [prom_check(prom)]))
+        assert result["status"] == "completed" and result["verdict"] == "confirmed"
+        assert result["slo"]["rounds"] >= 1 and result["slo"]["breached"] is False
+        assert prom.queries, "the SLO was never evaluated"
+
+    def test_no_slo_means_no_slo_in_the_record(self, runners, target):
+        result = run_to_end(runners(injector=Injector()), make_experiment(target))
+        assert result["slo"] is None
+
+    def test_a_breach_stops_the_chaos_and_falsifies_the_hypothesis(
+        self, runners, target, prom
+    ):
+        runner, inj, run = self.start_holding(runners, target, prom)
+        assert wait_for(
+            lambda: (runner.get(run["id"])["slo"] or {}).get("rounds", 0) >= 2
+        )
+        prom.body = vector(0.5)  # the error rate jumps
+        result = finished(runner, run["id"])
+        assert result["status"] == "aborted"
+        assert result["verdict"] == "falsified"
+        assert result["reason"].startswith(
+            "SLO breached: error-rate: 0.5 is not < 0.01"
+        )
+        assert inj.cut_short == ["cpu"], "the injection was left running"
+        assert lifecycle.active_types() == []
+        assert result["slo"]["breached"] and result["slo"]["kind"] == "breach"
+        assert metric_value(SLO_ABORTS_TOTAL, kind="breach") == 1
+        assert (
+            metric_value(EXPERIMENTS_TOTAL, status="aborted", verdict="falsified") == 1
+        )
+
+    def test_it_stops_quickly_not_at_the_end_of_the_schedule(
+        self, runners, target, prom
+    ):
+        runner, inj, run = self.start_holding(runners, target, prom)
+        started = time.monotonic()
+        prom.body = vector(0.5)
+        finished(runner, run["id"])
+        assert time.monotonic() - started < 8
+
+    def test_after_the_abort_it_still_looks_at_recovery(self, runners, target, prom):
+        runner, inj, run = self.start_holding(runners, target, prom)
+        prom.body = vector(0.5)
+        result = finished(runner, run["id"])
+        assert result["recovery"] is not None
+        assert (
+            result["recovery"]["reached"] is True
+        ), "the target is healthy once chaos stops"
+        assert result["verdict"] == "falsified", "recovering does not undo a breach"
+
+    def test_an_unreachable_prometheus_is_inconclusive_not_falsified(
+        self, runners, target, prom
+    ):
+        runner, inj, run = self.start_holding(runners, target, prom)
+        prom.status = 503
+        result = finished(runner, run["id"])
+        assert result["status"] == "aborted" and result["verdict"] == "inconclusive"
+        assert result["reason"] == "SLO could not be checked: error-rate: HTTP 503"
+        assert inj.cut_short == ["cpu"] and lifecycle.active_types() == []
+        assert result["slo"]["kind"] == "unavailable"
+        assert metric_value(SLO_ABORTS_TOTAL, kind="unavailable") == 1
+
+    def test_no_data_is_unavailable_unless_told_otherwise(self, runners, target, prom):
+        runner, inj, run = self.start_holding(runners, target, prom)
+        prom.body = vector()
+        result = finished(runner, run["id"])
+        assert (
+            result["verdict"] == "inconclusive"
+            and "no data returned" in result["reason"]
+        )
+
+    def test_an_http_check_works_as_an_slo(self, runners, target):
+        inj = Injector()
+        inj.hold_seconds = 30
+        runner = runners(injector=inj)
+        health = {"type": "http", "name": "api", "url": target.url, "timeout_seconds": 2,
+                  "expected_status": None, "max_latency_ms": None}  # fmt: skip
+        exp = with_slo(target, [health])
+        exp["schedule"].update(LONG)
+        exp["steady_state"].update(recovery_timeout_seconds=0)
+        run = runner.start(exp)
+        assert wait_for(lambda: lifecycle.is_active("cpu"))
+        target.status = 500
+        result = finished(runner, run["id"])
+        assert result["verdict"] == "falsified"
+        assert result["reason"].startswith("SLO breached: api: HTTP 500")
+
+    def test_a_grace_period_delays_the_first_check(self, runners, target, prom):
+        prom.body = vector(0.9)  # already breaching, but nobody looks yet
+        runner = runners(injector=Injector())
+        exp = with_slo(target, [prom_check(prom)], grace_seconds=30)
+        result = run_to_end(runner, exp)
+        assert result["status"] == "completed", "the grace period was ignored"
+        assert result["slo"]["rounds"] == 0 and prom.queries == []
+
+    def test_it_is_watched_while_the_last_injections_finish(
+        self, runners, target, prom
+    ):
+        """The schedule ends (cap reached) but a long injection is still running."""
+        inj = Injector()
+        inj.hold_seconds = 30
+        runner = runners(injector=inj)
+        exp = with_slo(target, [prom_check(prom)])
+        exp["schedule"].update(
+            duration_seconds=60, interval_seconds=1, max_injections=1
+        )
+        exp["steady_state"].update(recovery_timeout_seconds=0)
+        run = runner.start(exp)
+        assert wait_for(lambda: lifecycle.is_active("cpu"))
+        time.sleep(0.4)  # the engine hit its cap and is only draining
+        prom.body = vector(0.5)
+        result = finished(runner, run["id"])
+        assert result["status"] == "aborted" and result["verdict"] == "falsified"
+        assert inj.cut_short == ["cpu"]
+
+    def test_the_slo_summary_is_live_while_the_run_is_going(
+        self, runners, target, prom
+    ):
+        runner, inj, run = self.start_holding(runners, target, prom)
+        assert wait_for(
+            lambda: (runner.get(run["id"])["slo"] or {}).get("rounds", 0) >= 1
+        )
+        live = runner.get(run["id"])["slo"]
+        assert live["breached"] is False and live["last"][0]["name"] == "error-rate"
+        runner.abort()
+        finished(runner, run["id"])
+
+    def test_an_operator_abort_is_not_mistaken_for_a_breach(
+        self, runners, target, prom
+    ):
+        runner, inj, run = self.start_holding(runners, target, prom)
+        runner.abort()
+        result = finished(runner, run["id"])
+        assert (
+            result["verdict"] == "inconclusive"
+            and result["reason"] == "aborted by an operator"
+        )
+        assert metric_value(SLO_ABORTS_TOTAL, kind="breach") == 0
+
+    def test_the_audit_log_records_the_slo_outcome(self, runners, target, prom):
+        runner, inj, run = self.start_holding(runners, target, prom)
+        prom.body = vector(0.5)
+        finished(runner, run["id"])
+        assert wait_for(lambda: audit.recent(event="experiment.finished"))
+        slo = audit.recent(event="experiment.finished")[0]["slo"]
+        assert slo["breached"] is True and slo["check"] == "error-rate"
+
+
+class TestSloInDryRuns:
+    def test_a_dry_run_evaluates_the_checks_but_is_never_stopped(
+        self, runners, target, prom
+    ):
+        prom.body = vector(0.9)  # breaching from the start
+        runner = runners(injector=Injector())
+        exp = with_slo(target, [prom_check(prom)])
+        exp["schedule"].update(duration_seconds=1.0)
+        result = run_to_end(runner, exp, dry_run=True)
+        assert result["status"] == "completed", "a dry run must not be aborted"
+        assert (
+            result["slo"]["breached"] is True
+        ), "but it reports what would have happened"
+        assert result["slo"]["kind"] == "breach"
+        assert metric_value(SLO_ABORTS_TOTAL, kind="breach") == 0
+
+    def test_it_rehearses_the_connection_to_prometheus(self, runners, target, prom):
+        runner = runners(injector=Injector())
+        exp = with_slo(target, [prom_check(prom)])
+        exp["schedule"].update(duration_seconds=0.5)
+        run_to_end(runner, exp, dry_run=True)
+        assert prom.queries, "a dry run should prove the SLO query reaches Prometheus"

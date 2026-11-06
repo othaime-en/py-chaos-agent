@@ -46,7 +46,7 @@ import threading
 import time
 import uuid
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Deque, Dict, List, Mapping, Optional
 
@@ -55,7 +55,8 @@ from .engine import ChaosEngine, Settings
 from .kill_switch import KillSwitch
 from .lifecycle import lifecycle
 from .logging_config import get_logger
-from .metrics import EXPERIMENT_ACTIVE, EXPERIMENTS_TOTAL
+from .metrics import EXPERIMENT_ACTIVE, EXPERIMENTS_TOTAL, SLO_ABORTS_TOTAL
+from .slo import BREACH, SloMonitor
 from . import selection as selecting
 from . import targets
 from . import windows as time_windows
@@ -134,12 +135,17 @@ class ExperimentRun:
     window_closes_at: Optional[dt.datetime] = None
     target_labels: Optional[Dict[str, str]] = None
     selection: Optional[Dict[str, Any]] = None
+    slo_monitor: Optional[SloMonitor] = field(default=None, repr=False)
     baseline: Optional[SteadyStateResult] = None
     recovery: Optional[SteadyStateResult] = None
 
     @property
     def finished(self) -> bool:
         return self.status in FINAL_STATUSES
+
+    def slo_summary(self) -> Optional[Dict[str, Any]]:
+        """The SLO monitor's state (live while it runs), or ``None`` without an slo."""
+        return self.slo_monitor.summary() if self.slo_monitor is not None else None
 
     def to_dict(self) -> Dict[str, Any]:
         end = self.finished_at if self.finished_at is not None else time.time()
@@ -163,6 +169,7 @@ class ExperimentRun:
             "injections_started": self.injections_started,
             "window_closes_at": time_windows.iso(self.window_closes_at),
             "selection": self.selection,
+            "slo": self.slo_summary(),
             "target_labels": (
                 dict(self.target_labels) if self.target_labels is not None else None
             ),
@@ -456,6 +463,7 @@ class ExperimentRunner:
                 verdict=run.verdict.value if run.verdict else None,
                 reason=run.reason,
                 injections_started=run.injections_started,
+                slo=run.slo_summary(),
                 **who,
             )
             logger.info(
@@ -551,6 +559,13 @@ class ExperimentRunner:
         self._update(run, status=RunStatus.RUNNING)
         guard = self._guard(selector, window_closes_at, run.dry_run)
         abort_reason = self._inject(run, exp, guard)
+        monitor = run.slo_monitor
+        slo_breach = monitor.breach if monitor is not None and not run.dry_run else None
+        slo_abort = bool(
+            abort_reason
+            and slo_breach is not None
+            and abort_reason == slo_breach.reason()
+        )
         if self._shutting_down or lifecycle.is_shutting_down():
             self._finish(
                 run, RunStatus.ABORTED, Verdict.INCONCLUSIVE, abort_reason or "shutdown"
@@ -560,7 +575,13 @@ class ExperimentRunner:
         # 3. Recovery. After an abort there is no point waiting for the target to
         # come back: look once and record what is there.
         self._update(run, status=RunStatus.RECOVERING)
-        timeout = 0 if abort_reason else steady_state["recovery_timeout_seconds"]
+        # After an SLO abort the chaos is already removed, so whether the system
+        # comes back is worth knowing: wait for recovery as usual.
+        timeout = (
+            0
+            if abort_reason and not slo_abort
+            else steady_state["recovery_timeout_seconds"]
+        )
         recovery = wait_for_steady_state(steady_state, timeout, self._cancel)
         self._update(run, recovery=recovery)
         if abort_reason is None and recovery.cancelled and not recovery.reached:
@@ -568,7 +589,19 @@ class ExperimentRunner:
 
         # 4. Verdict
         if abort_reason:
-            self._finish(run, RunStatus.ABORTED, Verdict.INCONCLUSIVE, abort_reason)
+            # A breached limit is evidence against the hypothesis. A limit that
+            # could not be checked, or any other abort, concludes nothing.
+            falsified = (
+                slo_abort and slo_breach is not None and slo_breach.kind == BREACH
+            )
+            if slo_abort and slo_breach is not None:
+                SLO_ABORTS_TOTAL.labels(kind=slo_breach.kind).inc()
+            self._finish(
+                run,
+                RunStatus.ABORTED,
+                Verdict.FALSIFIED if falsified else Verdict.INCONCLUSIVE,
+                abort_reason,
+            )
         elif recovery.reached:
             self._finish(run, RunStatus.COMPLETED, Verdict.CONFIRMED)
         else:
@@ -645,16 +678,32 @@ class ExperimentRunner:
             },
             name=f"experiment-{run.id}",
         )
+        slo = exp.get("slo")
+        monitor = SloMonitor(slo) if slo else None
+        if monitor is not None:
+            self._update(run, slo_monitor=monitor)
+
+        def stop_check() -> Optional[str]:
+            # The SLO first: it is the most specific reason. Dry runs evaluate and
+            # report it but are never stopped by it.
+            if monitor is not None and not run.dry_run:
+                breach = monitor.breach
+                if breach is not None:
+                    return breach.reason()
+            return guard() if guard is not None else None
+
         engine.start()
+        if monitor is not None:
+            monitor.start()
         try:
             # Keep watching the whole time, including after the schedule ends while
             # the last injections finish: an abort, the kill switch, a closing
-            # window or a removed label must stop the chaos then too.
+            # window, a removed label or a breached SLO must stop the chaos then too.
             deadline = time.monotonic() + schedule["duration_seconds"]
             abort_reason = self._watch(
                 lambda: not engine.is_running or time.monotonic() >= deadline,
                 run.dry_run,
-                guard,
+                stop_check,
             )
             if abort_reason is None:
                 engine.halt()
@@ -666,13 +715,15 @@ class ExperimentRunner:
                     lambda: (not engine.is_running and engine.in_flight() == 0)
                     or time.monotonic() >= drain_deadline,
                     run.dry_run,
-                    guard,
+                    stop_check,
                 )
                 if abort_reason is None and (engine.is_running or engine.in_flight()):
                     abort_reason = "injections did not finish in time and were aborted"
             if abort_reason is not None:
                 engine.stop(timeout=_ABORT_TIMEOUT_SECONDS, reason=abort_reason)
         finally:
+            if monitor is not None:
+                monitor.stop()
             # Whatever happened above, never leave an engine (and so chaos) behind.
             if engine.is_running or engine.in_flight():
                 engine.stop(timeout=_ABORT_TIMEOUT_SECONDS, reason="experiment ended")

@@ -6,6 +6,7 @@ from src import auth
 from src.audit import audit
 from src.metrics import (
     EXPERIMENTS_TOTAL,
+    SLO_ABORTS_TOTAL,
     INJECTIONS_CLAMPED,
     INJECTIONS_TOTAL,
     INJECTION_ACTIVE,
@@ -28,6 +29,7 @@ def reset_metrics():
     INJECTION_ACTIVE.clear()
     INJECTIONS_CLAMPED.clear()
     EXPERIMENTS_TOTAL.clear()
+    SLO_ABORTS_TOTAL.clear()
     governor.reset()
     lifecycle.reset()
     auth.reset_throttle()
@@ -54,6 +56,7 @@ def reset_metrics():
     INJECTION_ACTIVE.clear()
     INJECTIONS_CLAMPED.clear()
     EXPERIMENTS_TOTAL.clear()
+    SLO_ABORTS_TOTAL.clear()
     governor.reset()
     lifecycle.reset()
     auth.reset_throttle()
