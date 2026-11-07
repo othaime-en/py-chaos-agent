@@ -343,7 +343,7 @@ experiments:
   - name: cpu-recovery
     # ...
     windows:
-      timezone: Africa/Dar_es_Salaam   # IANA name, default UTC
+      timezone: Pacific/Honolulu   # IANA name, default UTC
       allow:
         - days: [mon, tue, wed, thu]
           start: "10:00"
@@ -380,7 +380,7 @@ windows say: a deploy freeze, a sale, a holiday.
 
 ```yaml
 windows:
-  timezone: Africa/Dar_es_Salaam
+  timezone: Pacific/Honolulu
   allow:
     - days: [mon, tue, wed, thu]
       start: "10:00"

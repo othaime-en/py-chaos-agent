@@ -403,10 +403,10 @@ class TestWindows:
         out = self.valid(
             self.windows(
                 {"days": ["mon", "fri"], "start": "09:30", "end": "24:00"},
-                timezone="Africa/Dar_es_Salaam",
+                timezone="Pacific/Honolulu",
             )
         )
-        assert out["timezone"] == "Africa/Dar_es_Salaam"
+        assert out["timezone"] == "Pacific/Honolulu"
         assert out["allow"][0] == {
             "days": ["mon", "fri"],
             "start": "09:30",
