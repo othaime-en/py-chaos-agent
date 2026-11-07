@@ -106,9 +106,11 @@ Each role includes the ones before it.
 
 | Role | Can |
 | --- | --- |
-| `viewer` | `GET /status`, `/config`, `/config/failures/{type}`, `/limits`, `/kill-switch/status`, `/metrics/summary`, `/experiments`, `/experiments/{name}/selection`, `/experiment-runs`, `/target` |
-| `operator` | Also `POST /agent/start`, `/agent/stop`, `/agent/restart`, `/inject/manual`, `/inject/abort`, `/experiments/{name}/run`, `/experiment-runs/abort` |
-| `admin` | Also `PATCH /config`, `PATCH /config/failures/{type}`, `POST /config/reload`, `POST /kill-switch/reset`, `POST /metrics/reset`, `GET /audit` |
+| `viewer` | Read status, configuration, limits, kill switch state, the metrics summary and experiments |
+| `operator` | Also start, stop and restart the agent, inject failures, and run or abort experiments |
+| `admin` | Also change configuration, reset the kill switch or the metrics, and read the audit log |
+
+The [API Reference](../reference/api.md) lists the role each route needs.
 
 A user without the role gets `403` naming the role needed. That is not a failed
 login, so it does not count toward a lockout. The shared token is an `admin`.
