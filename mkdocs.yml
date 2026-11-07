@@ -23,6 +23,9 @@ theme:
     - content.code.copy
     - content.code.annotate
 
+validation:
+  anchors: warn
+
 plugins:
   - search
   - mkdocstrings:
