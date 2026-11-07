@@ -140,31 +140,30 @@ class TestMidnight:
 
 
 class TestTimeZones:
-    DAR = windows(win("10:00", "16:00"), timezone="Africa/Dar_es_Salaam")  # UTC+3
+    HNL = windows(win("10:00", "16:00"), timezone="Pacific/Honolulu")  # UTC-10, no DST
 
     def test_times_are_local(self):
-        assert evaluate(self.DAR, at("2026-11-02 07:00")).open  # 10:00 local
-        assert not evaluate(self.DAR, at("2026-11-02 06:59")).open
-        assert not evaluate(self.DAR, at("2026-11-02 13:00")).open  # 16:00 local
+        assert evaluate(self.HNL, at("2026-11-02 20:00")).open  # 10:00 local
+        assert not evaluate(self.HNL, at("2026-11-02 19:59")).open
+        assert not evaluate(self.HNL, at("2026-11-03 02:00")).open  # 16:00 local
 
     def test_the_local_day_decides_the_weekday(self):
-        # Sunday 22:00 UTC is already Monday 01:00 in Dar es Salaam.
-        monday = windows(
-            win("00:00", "06:00", ("mon",)), timezone="Africa/Dar_es_Salaam"
-        )
-        assert evaluate(monday, at("2026-11-01 22:00")).open
+        # Monday 05:00 UTC is still Sunday 19:00 in Honolulu.
+        monday = windows(win("00:00", "06:00", ("mon",)), timezone="Pacific/Honolulu")
+        assert not evaluate(monday, at("2026-11-02 05:00")).open
+        assert evaluate(monday, at("2026-11-02 12:00")).open
 
     def test_results_are_utc(self):
-        status = evaluate(self.DAR, at("2026-11-02 08:00"))
+        status = evaluate(self.HNL, at("2026-11-02 21:00"))
         assert status.closes_at.utcoffset() == dt.timedelta(0)
-        assert status.closes_at == at("2026-11-02 13:00")
+        assert status.closes_at == at("2026-11-03 02:00")
 
     def test_format_local(self):
-        text = format_local(at("2026-11-02 07:00"), self.DAR)
-        assert text == "Mon 2026-11-02 10:00 (Africa/Dar_es_Salaam)"
+        text = format_local(at("2026-11-02 20:00"), self.HNL)
+        assert text == "Mon 2026-11-02 10:00 (Pacific/Honolulu)"
 
     def test_format_local_without_a_moment(self):
-        assert format_local(None, self.DAR) == "an unknown time"
+        assert format_local(None, self.HNL) == "an unknown time"
 
 
 class TestDaylightSaving:
@@ -328,22 +327,22 @@ class TestBlackoutMerging:
 
 
 class TestBlackoutTimeZones:
-    DAR = freeze(
-        blackout("2026-12-24", "2026-12-24"), timezone="Africa/Dar_es_Salaam"
-    )  # UTC+3
+    HNL = freeze(
+        blackout("2026-12-24", "2026-12-24"), timezone="Pacific/Honolulu"
+    )  # UTC-10, no DST
 
     def test_the_dates_are_local_days(self):
-        # 2026-12-24 local runs from 2026-12-23 21:00 UTC to 2026-12-24 21:00 UTC.
-        assert not evaluate(self.DAR, at("2026-12-23 21:00")).open
-        assert evaluate(self.DAR, at("2026-12-23 20:59")).open
-        assert not evaluate(self.DAR, at("2026-12-24 20:59")).open
-        assert evaluate(self.DAR, at("2026-12-24 21:00")).open
+        # 2026-12-24 local runs from 2026-12-24 10:00 UTC to 2026-12-25 10:00 UTC.
+        assert not evaluate(self.HNL, at("2026-12-24 10:00")).open
+        assert evaluate(self.HNL, at("2026-12-24 09:59")).open
+        assert not evaluate(self.HNL, at("2026-12-25 09:59")).open
+        assert evaluate(self.HNL, at("2026-12-25 10:00")).open
 
     def test_the_message_names_the_local_time(self):
-        status = evaluate(self.DAR, at("2026-12-24 06:00"))
+        status = evaluate(self.HNL, at("2026-12-24 15:00"))  # 05:00 local
         assert (
-            format_local(status.opens_at, self.DAR)
-            == "Fri 2026-12-25 00:00 (Africa/Dar_es_Salaam)"
+            format_local(status.opens_at, self.HNL)
+            == "Fri 2026-12-25 00:00 (Pacific/Honolulu)"
         )
 
     def test_a_dst_zone_keeps_whole_local_days(self):

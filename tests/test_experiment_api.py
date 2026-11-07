@@ -408,14 +408,14 @@ class TestAudit:
 
 class TestTimeWindows:
     WINDOWS = {
-        "timezone": "Africa/Dar_es_Salaam",
+        "timezone": "Pacific/Honolulu",
         "allow": [{"days": ["mon"], "start": "10:00", "end": "16:00"}],
     }
 
     @pytest.fixture
     def clock(self, monkeypatch, configured):
-        """Monday 2026-11-02 12:00 UTC, which is 15:00 in Dar es Salaam."""
-        state = {"now": dt.datetime(2026, 11, 2, 12, 0, tzinfo=dt.timezone.utc)}
+        """Tuesday 2026-11-03 01:00 UTC, which is Monday 15:00 in Honolulu."""
+        state = {"now": dt.datetime(2026, 11, 3, 1, 0, tzinfo=dt.timezone.utc)}
         monkeypatch.setattr("src.windows.utcnow", lambda: state["now"])
         configured.experiments["cpu-spike"]["windows"] = self.WINDOWS
         return state
@@ -425,19 +425,19 @@ class TestTimeWindows:
             e["name"]: e for e in client.get("/experiments").json()["experiments"]
         }
         assert by_name["cpu-spike"]["window"] == {
-            "timezone": "Africa/Dar_es_Salaam",
+            "timezone": "Pacific/Honolulu",
             "open": True,
-            "closes_at": "2026-11-02T13:00:00Z",
+            "closes_at": "2026-11-03T02:00:00Z",
         }
         assert by_name["other"]["window"] is None
 
     def test_a_closed_window_says_when_it_opens(self, client, clock):
-        clock["now"] = dt.datetime(2026, 11, 2, 15, 0, tzinfo=dt.timezone.utc)
+        clock["now"] = dt.datetime(2026, 11, 3, 3, 0, tzinfo=dt.timezone.utc)
         window = client.get("/experiments").json()["experiments"][0]["window"]
         assert window == {
-            "timezone": "Africa/Dar_es_Salaam",
+            "timezone": "Pacific/Honolulu",
             "open": False,
-            "opens_at": "2026-11-09T07:00:00Z",
+            "opens_at": "2026-11-09T20:00:00Z",
         }
 
     def test_show_includes_the_windows_and_their_state(self, client, clock):
@@ -451,23 +451,23 @@ class TestTimeWindows:
         assert response.status_code == 202
         result = wait_finished(client, run_id(response))
         assert result["status"] == "completed"
-        assert result["window_closes_at"] == "2026-11-02T13:00:00Z"
+        assert result["window_closes_at"] == "2026-11-03T02:00:00Z"
 
     def test_outside_the_window_it_is_a_409_that_says_when(self, client, clock):
         clock["now"] = dt.datetime(
             2026, 11, 3, 12, 0, tzinfo=dt.timezone.utc
-        )  # Tuesday
+        )  # Tuesday 02:00 local
         runs_before = client.get("/experiment-runs").json()["count"]
         response = client.post("/experiments/cpu-spike/run")
         assert response.status_code == 409
         detail = response.json()["detail"]
         assert "Outside the allowed time window" in detail
-        assert "Mon 2026-11-09 10:00 (Africa/Dar_es_Salaam)" in detail
+        assert "Mon 2026-11-09 10:00 (Pacific/Honolulu)" in detail
         assert not agent_state.experiments.is_running
         assert client.get("/experiment-runs").json()["count"] == runs_before
 
     def test_too_little_time_left_is_a_409(self, client, clock):
-        clock["now"] = dt.datetime(2026, 11, 2, 12, 59, 58, tzinfo=dt.timezone.utc)
+        clock["now"] = dt.datetime(2026, 11, 3, 1, 59, 58, tzinfo=dt.timezone.utc)
         response = client.post("/experiments/cpu-spike/run")
         assert response.status_code == 409
         assert "Not enough time left" in response.json()["detail"]
