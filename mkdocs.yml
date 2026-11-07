@@ -34,7 +34,13 @@ plugins:
           paths: [src]
 
 markdown_extensions:
+  # codehilite makes the shadcn theme load its Pygments stylesheets.
+  # pymdownx.highlight renders the fenced blocks; css_class must be
+  # "codehilite" so the theme's copy button and colours attach to them.
+  - codehilite:
+      guess_lang: false
   - pymdownx.highlight:
+      css_class: codehilite
       anchor_linenums: true
       line_spans: __span
       pygments_lang_class: true

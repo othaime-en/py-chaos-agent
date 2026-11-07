@@ -4,3 +4,4 @@ mkdocs-shadcn>=0.12.2
 mkdocstrings>=1.0.8
 mkdocstrings-python>=2.0.10
 pymdown-extensions>=12.3
+Pygments>=2.21.0
