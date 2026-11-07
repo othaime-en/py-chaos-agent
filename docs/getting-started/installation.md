@@ -110,7 +110,7 @@ Once installation is complete:
 
 1. Review the [Configuration Guide](configuration.md) to customize your chaos experiments
 2. Follow the [Quick Start Guide](quickstart.md) to run your first chaos test
-3. Explore different [Failure Modes](../user-guide/failure-modes.md)
+3. Explore the available [failure types](configuration.md#failure-configurations)
 
 ## Troubleshooting
 
@@ -152,6 +152,6 @@ sudo usermod -aG docker $USER
 
 If you encounter issues during installation:
 
-- Check the [FAQ](../faq.md)
+- Check the [Troubleshooting guide](../user-guide/troubleshooting.md)
 - Open an issue on [GitHub](https://github.com/othaime-en/py-chaos-agent/issues)
 - Review existing issues for solutions

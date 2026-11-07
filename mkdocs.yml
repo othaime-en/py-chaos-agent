@@ -23,6 +23,9 @@ theme:
     - content.code.copy
     - content.code.annotate
 
+validation:
+  anchors: warn
+
 plugins:
   - search
   - mkdocstrings:
@@ -67,16 +70,11 @@ nav:
       - Process Targeting: user-guide/process-targeting.md
       - Kill Switch: user-guide/kill-switch.md
       - Shutdown and Cleanup: user-guide/shutdown-and-cleanup.md
-      - Failure Modes: user-guide/failure-modes.md
       - Troubleshooting: user-guide/troubleshooting.md
   - Development:
       - Contributing: development/development.md
-  - Reference:
-      - API Reference: reference/api.md
-      - Configuration Schema: reference/config-schema.md
-      - Metrics: reference/metrics.md
+  - API Reference: reference/api.md
   - Safety & Ethics: safety.md
-  - FAQ: faq.md
 
 extra:
   social:
