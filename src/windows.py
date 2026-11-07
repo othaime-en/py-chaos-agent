@@ -4,7 +4,7 @@ Allowed time windows: when an experiment may run.
 A window set (``ExperimentWindows`` in ``src.schemas``) is a time zone plus a list
 of windows, each a set of weekdays with a start and an end time::
 
-    timezone: Africa/Dar_es_Salaam
+    timezone: Pacific/Honolulu
     allow:
       - days: [mon, tue, wed, thu]
         start: "10:00"
