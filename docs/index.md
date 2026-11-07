@@ -62,4 +62,4 @@ Py-Chaos-Agent is actively maintained and used in development and staging enviro
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](https://github.com/othaimeen/py-chaos-agent/blob/main/LICENSE) file for details.
+This project is licensed under the MIT License - see the [LICENSE](https://github.com/othaime-en/py-chaos-agent/blob/main/LICENSE) file for details.
