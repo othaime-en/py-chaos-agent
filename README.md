@@ -1,9 +1,18 @@
-# chaos
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/logo-dark.svg">
+    <img src="docs/assets/logo.svg" alt="chaos logo" width="120">
+  </picture>
+</p>
 
-![CI/CD](https://github.com/othaime-en/chaos/workflows/CI/CD/badge.svg)
-![Python](https://img.shields.io/badge/python-3.12-blue)
-![License](https://img.shields.io/badge/license-MIT-green)
-![Coverage](https://raw.githubusercontent.com/othaime-en/chaos/badges/coverage.svg)
+<h1 align="center">chaos</h1>
+
+<p align="center">
+  <img src="https://github.com/othaime-en/chaos/workflows/CI/CD/badge.svg" alt="CI/CD">
+  <img src="https://img.shields.io/badge/python-3.12-blue" alt="Python">
+  <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
+  <img src="https://raw.githubusercontent.com/othaime-en/chaos/badges/coverage.svg" alt="Coverage">
+</p>
 
 A Python-based chaos engineering sidecar tool for testing the resilience of containerized applications. chaos runs alongside your application containers to inject controlled failures and validate system behavior under stress.
 
