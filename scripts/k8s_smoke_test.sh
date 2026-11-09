@@ -3,7 +3,7 @@
 # End-to-end check of the Kubernetes demo on a real cluster (CI runs it on kind).
 #
 # Needs: kubectl pointed at a cluster that already has the images
-# py-chaos-agent:1.0.0 and target-app:1.0.0 (for kind: `kind load docker-image`),
+# chaos:1.0.0 and target-app:1.0.0 (for kind: `kind load docker-image`),
 # plus curl, jq and openssl.
 #
 # It proves what unit tests cannot:

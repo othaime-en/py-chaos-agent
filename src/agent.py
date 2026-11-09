@@ -59,7 +59,7 @@ def main():
     # Now we can get the logger
     logger = get_logger(__name__)
 
-    logger.info("Py-Chaos-Agent starting", extra={"version": "1.0.0"})
+    logger.info("chaos starting", extra={"version": "1.0.0"})
 
     for warning in validate_config(config):
         logger.warning("Configuration warning", extra={"warning": warning})

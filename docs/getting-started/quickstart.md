@@ -5,8 +5,8 @@ Run the agent next to a demo app and trigger your first failure. You need Docker
 ## 1. Start the stack
 
 ```bash
-git clone https://github.com/othaime-en/py-chaos-agent.git
-cd py-chaos-agent
+git clone https://github.com/othaime-en/chaos.git
+cd chaos
 
 # Two different tokens: one for the control API, one for Prometheus to scrape metrics.
 {

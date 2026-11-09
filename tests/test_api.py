@@ -1,5 +1,5 @@
 """
-Basic tests for Py-Chaos-Agent API.
+Basic tests for chaos API.
 
 Run with: pytest tests/test_api.py
 """
@@ -71,7 +71,7 @@ class TestGeneralEndpoints:
         response = client.get("/")
         assert response.status_code == 200
         data = response.json()
-        assert data["service"] == "py-chaos-agent"
+        assert data["service"] == "chaos"
         assert "version" in data
         assert "status" in data
 

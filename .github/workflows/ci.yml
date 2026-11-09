@@ -19,7 +19,7 @@ concurrency:
 # moved to malicious code (aquasecurity/trivy-action was hit exactly that way in
 # March 2026). Dependabot proposes the updates. The comment names the version.
 env:
-  AGENT_IMAGE: py-chaos-agent:1.0.0
+  AGENT_IMAGE: chaos:1.0.0
   TARGET_IMAGE: target-app:1.0.0
 
 jobs:
@@ -97,7 +97,7 @@ jobs:
         include:
           - name: agent
             dockerfile: docker/Dockerfile
-            image: py-chaos-agent:1.0.0
+            image: chaos:1.0.0
           - name: target
             dockerfile: docker/Dockerfile.target
             image: target-app:1.0.0

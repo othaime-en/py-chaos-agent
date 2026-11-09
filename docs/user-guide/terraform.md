@@ -69,7 +69,7 @@ the tag in `k8s/chaos-demo.yaml`:
 ```bash
 REPO=$(terraform output -json ecr_repo_urls | jq -r .chaos_agent)
 aws ecr get-login-password | docker login --username AWS --password-stdin "${REPO%%/*}"
-docker tag py-chaos-agent:1.0.0 "$REPO:1.0.0"
+docker tag chaos:1.0.0 "$REPO:1.0.0"
 docker push "$REPO:1.0.0"
 ```
 

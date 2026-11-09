@@ -42,7 +42,7 @@ kubectl describe pod -n chaos-demo <pod-name> | grep -A 10 Mounts
 
 ```bash
 # Rebuild Docker image with all dependencies
-docker build -t py-chaos-agent:1.0.0 -f docker/Dockerfile .
+docker build -t chaos:1.0.0 -f docker/Dockerfile .
 
 # Verify requirements.txt includes all packages
 cat requirements.txt
@@ -375,7 +375,7 @@ newgrp docker
 ```bash
 # Check network
 docker network ls
-docker network inspect py-chaos-agent_default
+docker network inspect chaos_default
 
 # Verify network mode in docker-compose.yml
 network_mode: "service:target-app"  # Correct
@@ -410,7 +410,7 @@ kubectl describe pod -n chaos-demo <pod-name>
 ```bash
 # For local images (minikube/kind)
 eval $(minikube docker-env)  # or
-kind load docker-image py-chaos-agent:1.0.0
+kind load docker-image chaos:1.0.0
 
 # For ECR
 aws ecr get-login-password --region us-east-1 | \

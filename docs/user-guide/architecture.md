@@ -2,7 +2,7 @@
 
 ## Design Philosophy
 
-Py-Chaos-Agent follows the sidecar pattern, running as a separate container alongside your application within the same Kubernetes pod. This design provides:
+chaos follows the sidecar pattern, running as a separate container alongside your application within the same Kubernetes pod. This design provides:
 
 - **Process isolation**: The chaos agent runs independently but can interact with target processes
 - **Network sharing**: Both containers share the same network namespace for realistic network chaos
@@ -16,7 +16,7 @@ Py-Chaos-Agent follows the sidecar pattern, running as a separate container alon
 │                      Kubernetes Pod                         │
 │                                                             │
 │  ┌─────────────────────┐    ┌──────────────────────────┐  │
-│  │   Target Application │    │    Py-Chaos-Agent        │  │
+│  │   Target Application │    │    chaos                 │  │
 │  │                      │    │                          │  │
 │  │  - Business logic    │    │  - Config loader         │  │
 │  │  - Port 8080         │    │  - Failure injector      │  │

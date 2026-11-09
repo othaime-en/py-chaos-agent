@@ -1,5 +1,5 @@
 """
-Configuration loading and validation for Py-Chaos-Agent.
+Configuration loading and validation for chaos.
 
 Loads configuration from config.yaml, validates it against the schemas in
 ``src.schemas`` (types, ranges, unknown keys), and provides typed access.

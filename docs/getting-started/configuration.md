@@ -2,7 +2,7 @@
 
 ## Overview
 
-Py-Chaos-Agent is configured via a YAML file that defines agent behavior and failure injection parameters. The default configuration file is `config.yaml` in the application root.
+chaos is configured via a YAML file that defines agent behavior and failure injection parameters. The default configuration file is `config.yaml` in the application root.
 
 ## Configuration Structure
 

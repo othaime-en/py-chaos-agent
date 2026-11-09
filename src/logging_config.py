@@ -1,5 +1,5 @@
 """
-Logging configuration for Py-Chaos-Agent.
+Logging configuration for chaos.
 
 This module provides centralized logging configuration with:
 - Structured logging with context
@@ -35,7 +35,7 @@ class StructuredFormatter(logging.Formatter):
         super().__init__(fmt, datefmt, style)
         self.json_format = json_format
         self.hostname = os.environ.get("HOSTNAME", "unknown")
-        self.service_name = "py-chaos-agent"
+        self.service_name = "chaos"
 
     def format(self, record: logging.LogRecord) -> str:
         """Format log record as JSON or structured text."""
