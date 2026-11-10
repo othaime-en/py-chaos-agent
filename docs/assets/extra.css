@@ -1,0 +1,8 @@
+/* Show the black logo on light pages and the white one on dark pages.
+   The theme toggles a `dark` class on <html>, so key off that rather than
+   the OS preference (the visitor can override it with the theme switch). */
+.logo-dark { display: none; }
+.dark .logo-light { display: none; }
+.dark .logo-dark { display: inline; }
+.logo-header { text-align: center; }
+.logo-header img { width: 120px; max-width: 100%; }
