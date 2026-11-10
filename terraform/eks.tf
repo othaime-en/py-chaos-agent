@@ -29,7 +29,7 @@ module "eks" {
 
   tags = {
     Environment = "chaos-demo"
-    Project     = "py-chaos-agent"
+    Project     = "kaos"
   }
 }
 

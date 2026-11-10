@@ -7,7 +7,7 @@ Chaos engineering is a powerful tool for building resilient systems, but it must
 ### Only Test Systems You Own
 
 !!! danger "Critical"
-Only use Py-Chaos-Agent on systems you own or have explicit written permission to test. Unauthorized chaos testing is unethical and potentially illegal.
+Only use kaos on systems you own or have explicit written permission to test. Unauthorized chaos testing is unethical and potentially illegal.
 
 ### Never Use in Production Without Approval
 
@@ -34,7 +34,7 @@ Begin your chaos journey with:
 
 ### Built-in Protections
 
-Py-Chaos-Agent includes several safety mechanisms:
+kaos includes several safety mechanisms:
 
 - **Self-protection**: Won't terminate its own process
 - **Dry run mode**: Test without actual injection
@@ -175,7 +175,7 @@ If you have questions about safe chaos engineering:
 
 ## Report Issues
 
-If you discover a safety issue with Py-Chaos-Agent:
+If you discover a safety issue with kaos:
 
 - Open a security issue on GitHub
 - Contact maintainers directly

@@ -13,8 +13,8 @@
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/py-chaos-agent.git
-cd py-chaos-agent
+git clone https://github.com/yourusername/kaos.git
+cd kaos
 
 # Create virtual environment
 python -m venv venv
@@ -34,7 +34,7 @@ python -c "import psutil, yaml, prometheus_client; print('Dependencies OK')"
 ## Project Structure
 
 ```
-py-chaos-agent/
+kaos/
 ├── src/
 │   ├── __init__.py
 │   ├── agent.py              # Standalone entry point
@@ -450,7 +450,7 @@ def reset_metrics():
 ```bash
 # Inspect network
 docker network ls
-docker network inspect py-chaos-agent_default
+docker network inspect kaos_default
 
 # Check if containers can reach each other
 docker exec chaos-agent ping target-app

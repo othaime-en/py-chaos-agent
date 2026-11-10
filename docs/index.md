@@ -1,6 +1,6 @@
-# Py-Chaos-Agent
+# kaos
 
-![CI/CD](https://github.com/othaime-en/py-chaos-agent/workflows/CI/CD/badge.svg)
+![CI/CD](https://github.com/othaime-en/kaos/workflows/CI/CD/badge.svg)
 ![Python](https://img.shields.io/badge/python-3.12-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Coverage](https://img.shields.io/badge/coverage-92%25-brightgreen)
@@ -9,7 +9,7 @@ A Python-based chaos engineering sidecar tool for testing the resilience of cont
 
 ## Overview
 
-Py-Chaos-Agent runs alongside your application containers to inject controlled failures and validate system behavior under stress. It's designed to help you build more resilient systems by proactively testing how they handle various failure scenarios.
+kaos runs alongside your application containers to inject controlled failures and validate system behavior under stress. It's designed to help you build more resilient systems by proactively testing how they handle various failure scenarios.
 
 ## Key Features
 
@@ -58,8 +58,8 @@ See our [Safety & Ethics](safety.md) guidelines for responsible chaos engineerin
 
 ## Project Status
 
-Py-Chaos-Agent is actively maintained and used in development and staging environments. We welcome contributions and feedback from the community.
+kaos is actively maintained and used in development and staging environments. We welcome contributions and feedback from the community.
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](https://github.com/othaime-en/py-chaos-agent/blob/main/LICENSE) file for details.
+This project is licensed under the MIT License - see the [LICENSE](https://github.com/othaime-en/kaos/blob/main/LICENSE) file for details.

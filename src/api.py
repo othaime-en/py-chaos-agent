@@ -1,5 +1,5 @@
 """
-FastAPI interface for Py-Chaos-Agent control.
+FastAPI interface for kaos control.
 
 Provides programmatic control over chaos injections through REST API.
 """
@@ -254,7 +254,7 @@ _docs_enabled = os.environ.get("CHAOS_API_ENABLE_DOCS", "").strip().lower() in {
 }
 
 app = FastAPI(
-    title="Py-Chaos-Agent API",
+    title="kaos API",
     description="REST API for controlling chaos engineering experiments",
     version="1.0.0",
     lifespan=lifespan,
@@ -357,7 +357,7 @@ class FailureConfigResponse(BaseModel):
 async def root():
     """API root - health check."""
     return {
-        "service": "py-chaos-agent",
+        "service": "kaos",
         "version": "1.0.0",
         "status": "running",
         "agent_enabled": agent_state.enabled,

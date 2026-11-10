@@ -1,10 +1,10 @@
 # Installation
 
-This guide covers the different ways to install and run Py-Chaos-Agent.
+This guide covers the different ways to install and run kaos.
 
 ## Prerequisites
 
-Before installing Py-Chaos-Agent, ensure you have:
+Before installing kaos, ensure you have:
 
 - Python 3.12 or higher
 - Docker (for containerized deployment)
@@ -13,13 +13,13 @@ Before installing Py-Chaos-Agent, ensure you have:
 
 ## Docker Installation
 
-The recommended way to run Py-Chaos-Agent is using Docker containers.
+The recommended way to run kaos is using Docker containers.
 
 ### Pull Pre-built Images
 
 ```bash
 # Pull the chaos agent image
-docker pull itsothaimeen/py-chaos-agent:latest
+docker pull itsothaimeen/kaos:latest
 
 # Pull the target app image (for testing)
 docker pull itsothaimeen/target-app:latest
@@ -29,11 +29,11 @@ docker pull itsothaimeen/target-app:latest
 
 ```bash
 # Clone the repository
-git clone https://github.com/othaime-en/py-chaos-agent.git
-cd py-chaos-agent
+git clone https://github.com/othaime-en/kaos.git
+cd kaos
 
 # Build the chaos agent image
-docker build -t py-chaos-agent:1.0.0 -f docker/Dockerfile .
+docker build -t kaos:1.0.0 -f docker/Dockerfile .
 
 # Build the target app image
 docker build -t target-app:1.0.0 -f docker/Dockerfile.target .
@@ -45,8 +45,8 @@ For local development and testing:
 
 ```bash
 # Clone the repository
-git clone https://github.com/othaime-en/py-chaos-agent.git
-cd py-chaos-agent
+git clone https://github.com/othaime-en/kaos.git
+cd kaos
 
 # Create a virtual environment
 python -m venv venv
@@ -68,11 +68,11 @@ For Kubernetes deployment, you'll need:
 
 ```bash
 # Load images (for local testing with kind/minikube)
-kind load docker-image py-chaos-agent:1.0.0
+kind load docker-image kaos:1.0.0
 kind load docker-image target-app:1.0.0
 
 # Or for minikube
-minikube image load py-chaos-agent:1.0.0
+minikube image load kaos:1.0.0
 minikube image load target-app:1.0.0
 ```
 
@@ -153,5 +153,5 @@ sudo usermod -aG docker $USER
 If you encounter issues during installation:
 
 - Check the [Troubleshooting guide](../user-guide/troubleshooting.md)
-- Open an issue on [GitHub](https://github.com/othaime-en/py-chaos-agent/issues)
+- Open an issue on [GitHub](https://github.com/othaime-en/kaos/issues)
 - Review existing issues for solutions

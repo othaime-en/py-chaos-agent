@@ -2,7 +2,7 @@
 # what the cluster pulls is what was scanned and approved. Push a new version
 # tag for every build (the manifests use 1.0.0, never :latest).
 resource "aws_ecr_repository" "chaos_agent" {
-  name                 = "py-chaos-agent"
+  name                 = "kaos"
   image_tag_mutability = "IMMUTABLE"
 
   image_scanning_configuration {

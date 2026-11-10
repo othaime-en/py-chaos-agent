@@ -1,5 +1,5 @@
 """
-Authentication for the Py-Chaos-Agent control API.
+Authentication for the kaos control API.
 
 Design:
 - Secure by default. Every route requires a bearer token except the
