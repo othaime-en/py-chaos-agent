@@ -1,5 +1,5 @@
 """
-Standalone API server for Py-Chaos-Agent.
+Standalone API server for kaos.
 
 Run this to start the FastAPI server:
     python -m src.api_server
@@ -44,7 +44,7 @@ class ChaosServer(uvicorn.Server):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Py-Chaos-Agent API Server")
+    parser = argparse.ArgumentParser(description="kaos API Server")
     parser.add_argument(
         "--host",
         default=os.environ.get("CHAOS_API_HOST", "127.0.0.1"),
@@ -154,7 +154,7 @@ def main():
         raise SystemExit(f"Refusing to start: {e}")
 
     logger.info(
-        "Starting Py-Chaos-Agent API Server",
+        "Starting kaos API Server",
         extra={
             "api_host": args.host,
             "api_port": args.port,

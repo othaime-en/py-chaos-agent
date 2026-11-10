@@ -1,5 +1,5 @@
 """
-Typed, bounded schemas for all Py-Chaos-Agent configuration.
+Typed, bounded schemas for all kaos configuration.
 
 One set of models validates every way a value can enter the system:
 

@@ -1,5 +1,5 @@
 """
-Kill switch (circuit breaker) for Py-Chaos-Agent.
+Kill switch (circuit breaker) for kaos.
 
 Stops chaos automatically when the target application becomes unhealthy, and
 lets it resume once the target has recovered.

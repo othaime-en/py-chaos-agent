@@ -1,11 +1,20 @@
-# Py-Chaos-Agent
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/logo-dark.svg">
+    <img src="docs/assets/logo.svg" alt="kaos logo" width="120">
+  </picture>
+</p>
 
-![CI/CD](https://github.com/othaime-en/py-chaos-agent/workflows/CI/CD/badge.svg)
-![Python](https://img.shields.io/badge/python-3.12-blue)
-![License](https://img.shields.io/badge/license-MIT-green)
-![Coverage](https://raw.githubusercontent.com/othaime-en/py-chaos-agent/badges/coverage.svg)
+<h1 align="center">kaos</h1>
 
-A Python-based chaos engineering sidecar tool for testing the resilience of containerized applications. Py-Chaos-Agent runs alongside your application containers to inject controlled failures and validate system behavior under stress.
+<p align="center">
+  <img src="https://github.com/othaime-en/kaos/workflows/CI/CD/badge.svg" alt="CI/CD">
+  <img src="https://img.shields.io/badge/python-3.12-blue" alt="Python">
+  <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
+  <img src="https://raw.githubusercontent.com/othaime-en/kaos/badges/coverage.svg" alt="Coverage">
+</p>
+
+A Python-based chaos engineering sidecar tool for testing the resilience of containerized applications. kaos runs alongside your application containers to inject controlled failures and validate system behavior under stress.
 
 ## Features
 
@@ -23,8 +32,8 @@ A Python-based chaos engineering sidecar tool for testing the resilience of cont
 
 ```bash
 # Clone the repository
-git clone https://github.com/othaime-en/py-chaos-agent.git
-cd py-chaos-agent
+git clone https://github.com/othaime-en/kaos.git
+cd kaos
 
 # Set the two tokens (required; the agent will not start without them): one for
 # the control API, one for Prometheus to scrape metrics. They must differ.
@@ -55,7 +64,7 @@ curl http://localhost:8080
 
 ```bash
 # Build and load images (for local testing with kind/minikube)
-docker build -t py-chaos-agent:1.0.0 -f docker/Dockerfile .
+docker build -t kaos:1.0.0 -f docker/Dockerfile .
 docker build -t target-app:1.0.0 -f docker/Dockerfile.target .
 
 # Deploy to Kubernetes (the pod needs the token Secret to start: one token for the
@@ -116,7 +125,7 @@ See [Configuration Guide](docs/configuration.md) for detailed options.
 
 ## Architecture
 
-Py-Chaos-Agent runs as a sidecar container in Kubernetes, sharing the process and network namespaces with your target application. Process kills and network latency act on that pod only.
+kaos runs as a sidecar container in Kubernetes, sharing the process and network namespaces with your target application. Process kills and network latency act on that pod only.
 
 CPU and memory injections run inside the sidecar's own container, so they are bounded by **that container's resource limits**, and the agent sizes them to a fraction of those limits. This protection exists only when limits are set (the demo manifests set them). Without limits, a CPU or memory injection competes with every pod on the node. See [Blast Radius](docs/user-guide/blast-radius.md).
 

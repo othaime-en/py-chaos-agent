@@ -1,14 +1,16 @@
-site_name: Py-Chaos-Agent Documentation
+site_name: kaos
 site_description: A Python-based chaos engineering sidecar tool for testing containerized applications
 site_author: othaime-en
-site_url: https://othaime-en.github.io/py-chaos-agent/
+site_url: https://othaime-en.github.io/kaos/
 
-repo_name: othaime-en/py-chaos-agent
-repo_url: https://github.com/othaime-en/py-chaos-agent
+repo_name: othaime-en/kaos
+repo_url: https://github.com/othaime-en/kaos
 edit_uri: edit/main/docs/
 
 theme:
   name: shadcn
+  icon: assets/logo-icon.svg
+  favicon: assets/favicon.svg
   palette:
     scheme: slate
   features:
@@ -22,6 +24,9 @@ theme:
     - search.highlight
     - content.code.copy
     - content.code.annotate
+
+extra_css:
+  - assets/extra.css
 
 validation:
   anchors: warn
@@ -85,4 +90,4 @@ nav:
 extra:
   social:
     - icon: fontawesome/brands/github
-      link: https://github.com/othaime-en/py-chaos-agent
+      link: https://github.com/othaime-en/kaos
