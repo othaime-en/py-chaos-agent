@@ -1,7 +1,7 @@
 mkdocs>=1.6.1
-mkdocs-material>=9.8.0
+mkdocs-material>=9.8.1
 mkdocs-shadcn>=0.12.2
 mkdocstrings>=1.0.8
 mkdocstrings-python>=2.0.10
-pymdown-extensions>=12.3
+pymdown-extensions>=13.0
 Pygments>=2.21.0
